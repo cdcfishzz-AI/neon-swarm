@@ -65,7 +65,12 @@
                 dmg: 0.5, color: '#ffd45e', pierce: false },
       // 恒定高射速：不随 Combo 降速（Boss 战掉 Combo 时也能保持 DPS）
       laser:  { name: 'LANCE',   cn: '穿透', base: 0.10, constant: true, speed: 1800, life: 4.0, pellets: 1, spread: 0,
-                dmg: 3.0, color: '#dff7ff', pierce: true }
+                dmg: 3.0, color: '#dff7ff', pierce: true },
+      // 进化武器：不进普通掉落池，只能由融合触发
+      nova:   { name: '星爆', cn: 'NOVA', base: 0.21, speed: 920, life: 4.0, pellets: 3, spread: 0.16,
+                dmg: 1.15, color: '#ffd45e', pierce: false, evolved: 'nova' },
+      rift:   { name: '裂空', cn: 'RIFT', base: 0.14, constant: true, speed: 1900, life: 4.0, pellets: 1, spread: 0,
+                dmg: 2.6, color: '#c9a2ff', pierce: true, evolved: 'rift' }
     },
 
     // 掉落权重（击杀随机掉落；每 15 杀保底一个）
@@ -75,6 +80,7 @@
       { type: 'shield',   weight: 22 },
       { type: 'over',     weight: 14 },
       { type: 'slow',     weight: 12 },
+      { type: 'w_pulse',  weight: 8 },
       { type: 'w_spread', weight: 9 },
       { type: 'w_laser',  weight: 7 }
     ],
@@ -84,7 +90,8 @@
       shield:   { name: '护盾',   glyph: 'O', color: '#5ee8ff' },
       over:     { name: '超载',   glyph: '>', color: '#ffb03f' },
       slow:     { name: '时缓',   glyph: '=', color: '#b98cff' },
-      w_spread: { name: '散射枪', glyph: 'W', color: '#ffd45e' },
+      w_pulse:  { name: '脉冲枪', glyph: 'P', color: '#eaffff' },
+      w_spread: { name: '散射枪', glyph: 'S', color: '#ffd45e' },
       w_laser:  { name: '穿透枪', glyph: 'L', color: '#bff4ff' }
     },
     pickup: { chance: 0.16, pityEvery: 15, life: 12, magnet: 90, radius: 18, cap: 14 },
@@ -206,6 +213,7 @@
     upgrades: null,
     metaOpen: false, metaHover: -1, shardsEarned: 0,
     wingCount: 1, wingLevel: 1, wings: [],
+    weaponPicks: null, evolved: null, evolution: null, evoBanner: 0,
     rewardT: 0, rewardDur: 0.3, rewardDrops: 0,
     sysLog: null,
     chainFx: [],
@@ -352,6 +360,7 @@
     if (kind === 'bullets') {
       o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.dmg = 0; o.r = 0;
       o.pierce = false; o.bossHit = false; o.color = '';
+      o.child = false; o.splitDone = false; o.exploded = false;
       if (o.hits) o.hits.length = 0; else o.hits = [];
     } else if (kind === 'ebullets') {
       o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.r = 0; o.color = '';
@@ -712,6 +721,20 @@
     chain: function () {
       tone('square', 1200, 620, 0.08, 0.03);
       noiseBurst(0.05, 0.04, 3000);
+    },
+    evolve: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 110, 55, 0.8, 0.16, t);
+      tone('sine', 330, 660, 0.35, 0.06, t + 0.05);
+      tone('sine', 660, 990, 0.45, 0.05, t + 0.25);
+      tone('sine', 990, 1320, 0.5, 0.04, t + 0.4);
+      noiseBurst(0.35, 0.06, 5000);
+    },
+    split: function () { tone('sine', 1200, 1600, 0.05, 0.02); },
+    rift: function () {
+      tone('sawtooth', 260, 80, 0.16, 0.05);
+      noiseBurst(0.12, 0.06, 1600);
     },
     wingLevel: function () {
       var ac = ensureAudio(); if (!ac) return;
@@ -1278,6 +1301,8 @@
     }
     S.shardsEarned = 0;
     S.metaOpen = false; S.metaHover = -1;
+    S.weaponPicks = { pulse: 0, spread: 0, laser: 0 };
+    S.evolved = null; S.evolution = null; S.evoBanner = 0;
     input.firing = false;
     story.text = ''; story.t = -1; story.phase = -1;
     story.nextTrigger = 10; story.cooldown = 0; story.flicker = 0;
@@ -1386,6 +1411,41 @@
     sfx.kill();
   }
 
+  function spawnSplit(b) {
+    var a = Math.atan2(b.vy, b.vx), sp = Math.hypot(b.vx, b.vy) * 0.85;
+    for (var k = -1; k <= 1; k += 2) {
+      var nb = poolTake('bullets', S.bullets);
+      nb.x = b.x; nb.y = b.y;
+      nb.vx = Math.cos(a + k * 0.5) * sp;
+      nb.vy = Math.sin(a + k * 0.5) * sp;
+      nb.life = 1.1; nb.dmg = b.dmg * 0.55; nb.r = 2;
+      nb.pierce = false; nb.bossHit = false;
+      nb.child = true; nb.splitDone = true; nb.exploded = false;
+      if (nb.hits) nb.hits.length = 0; else nb.hits = [];
+      nb.color = '#ffd45e';
+    }
+    sfx.split();
+  }
+
+  function riftExplode(x, y, dmg, source) {
+    var es = S.enemies, i;
+    for (i = 0; i < es.length; i++) {
+      var e = es[i];
+      if (e === source || e.hp <= 0) continue;
+      var dx = e.x - x, dy = e.y - y;
+      if (dx * dx + dy * dy > 76 * 76) continue;
+      e.hp -= dmg;
+      e.flash = 0.09;
+      sparkBurst(e.x, e.y, 5, '#c9a2ff');
+      if (e.hp <= 0) killEnemy(e);
+    }
+    var rg = poolTake('rings', S.rings);
+    rg.x = x; rg.y = y; rg.r = 8; rg.r1 = 82;
+    rg.life = 0.32; rg.max = 0.32; rg.color = '#c9a2ff';
+    S.trauma = Math.min(1, S.trauma + 0.06);
+    sfx.rift();
+  }
+
   function tryChain(source) {
     if (!S.upgrades || !S.upgrades.chain) return;
     if (rnd() > 0.14 * S.upgrades.chain) return;
@@ -1472,6 +1532,7 @@
       b.r = w.pierce ? 2 : 3;
       b.pierce = !!w.pierce || !!(S.upgrades && S.upgrades.pierce);
       b.bossHit = false;
+      b.child = false; b.splitDone = false; b.exploded = false;
       if (b.hits) b.hits.length = 0; else b.hits = [];
       b.color = w.color;
     }
@@ -1516,12 +1577,17 @@
     } else if (pk.type === 'slow') {
       S.slow = Math.max(S.slow, 4.5);
       label = '时缓 4.5s';
-    } else if (pk.type === 'w_spread') {
-      p.weapon = 'spread';
-      label = 'SCATTER';
-    } else if (pk.type === 'w_laser') {
-      p.weapon = 'laser';
-      label = 'LANCE';
+    } else if (pk.type === 'w_pulse' || pk.type === 'w_spread' || pk.type === 'w_laser') {
+      var wid = pk.type === 'w_spread' ? 'spread' : (pk.type === 'w_laser' ? 'laser' : 'pulse');
+      if (S.evolved) {
+        S.score += 60;
+        label = '进化武器 +60';
+      } else {
+        p.weapon = wid;
+        S.weaponPicks[wid] = (S.weaponPicks[wid] || 0) + 1;
+        label = CFG.weapons[wid].name;
+        checkWeaponEvolution();
+      }
     } else if (pk.type === 'coin') {
       S.score += 40;
       label = '+40 分';
@@ -1534,6 +1600,48 @@
     crg.life = 0.4; crg.max = 0.4; crg.color = info.color;
     S.trauma = Math.min(1, S.trauma + 0.10);
     sfx.pickup();
+  }
+
+  // ===== 武器融合进化：PULSE/SCATTER → 星爆；LANCE(+穿透) → 裂空 =====
+  function checkWeaponEvolution() {
+    if (S.evolved) return;
+    var q = S.weaponPicks;
+    // 任意两次脉冲/散射拾取：脉冲×2、散射×2、或 PULSE × SCATTER
+    if ((q.pulse || 0) + (q.spread || 0) >= 2) {
+      evolveWeapon('nova');
+      return;
+    }
+    if ((q.laser || 0) >= 2 || ((q.laser || 0) >= 1 && S.upgrades.pierce)) {
+      evolveWeapon('rift');
+    }
+  }
+
+  function evolveWeapon(id) {
+    S.evolved = id;
+    S.player.weapon = id;
+    S.mode = 'evolution';
+    S.evolution = { t: 0, dur: 0.55, id: id };
+    S.evoBanner = 2.8;
+    S.fireCooldown = 0;
+    input.firing = false;
+    S.victoryFlash = 0.5;
+    S.trauma = Math.min(1, S.trauma + 0.3);
+    sparkBurst(S.player.x, S.player.y, 30, id === 'nova' ? '#ffd45e' : '#c9a2ff');
+    var rg = poolTake('rings', S.rings);
+    rg.x = S.player.x; rg.y = S.player.y; rg.r = 12; rg.r1 = 150;
+    rg.life = 0.6; rg.max = 0.6; rg.color = id === 'nova' ? '#ffd45e' : '#c9a2ff';
+    sfx.evolve();
+  }
+
+  function updateEvolution(dt) {
+    if (S.evolution) S.evolution.t += dt;
+    if (S.victoryFlash > 0) S.victoryFlash = Math.max(0, S.victoryFlash - dt);
+    updateShake(dt);
+    stepParticles(dt * 0.4);
+    if (!S.evolution || S.evolution.t >= S.evolution.dur) {
+      S.mode = 'playing';
+      S.evolution = null;
+    }
   }
 
   // ===== Boss 战利品：暂停三选一强化 =====
@@ -2197,6 +2305,14 @@
       hitE.hp -= b.dmg;
       hitE.flash = 0.09;
       sparkBurst(bx, by, CFG.fx.hitSparks, COL.spark);
+      if (S.evolved === 'nova' && !b.child && !b.splitDone) {
+        b.splitDone = true;
+        spawnSplit(b);
+      }
+      if (S.evolved === 'rift' && !b.exploded) {
+        b.exploded = true;
+        riftExplode(b.x, b.y, b.dmg * 0.55, hitE);
+      }
       if (b.pierce) { b.hits.push(enemyUid(hitE)); } else { poolGive('bullets', S.bullets, i); }
       if (hitE.hp <= 0) killEnemy(hitE);
       if (S.upgrades && S.upgrades.chain > 0) tryChain(hitE);
@@ -2328,6 +2444,7 @@
       if (S.comboTimer <= 0) { S.combo = 0; S.comboTimer = 0; }
     }
     if (S.waveBanner > 0) S.waveBanner = Math.max(0, S.waveBanner - dt);
+    if (S.evoBanner > 0) S.evoBanner = Math.max(0, S.evoBanner - dt);
     if (S.victoryFlash > 0) S.victoryFlash = Math.max(0, S.victoryFlash - dt);
     if (S.sysLog) {
       S.sysLog.t += dt;
@@ -2590,7 +2707,8 @@
       if (!inView(b.x, b.y, b.pierce ? 48 : 30)) { renderStats.culled++; continue; }
       renderStats.drawn++;
       ctx.strokeStyle = b.color || COL.bullet;
-      ctx.lineWidth = b.pierce ? 2.5 : 3;
+      ctx.shadowColor = b.color || '#9ff6ff';
+      ctx.lineWidth = b.child ? 2 : (b.pierce ? 2.5 : 3);
       ctx.beginPath();
       ctx.moveTo(b.x - b.vx * (b.pierce ? 0.03 : 0.018), b.y - b.vy * (b.pierce ? 0.03 : 0.018));
       ctx.lineTo(b.x, b.y);
@@ -2815,6 +2933,28 @@
       ctx.restore();
     }
 
+    // 武器进化横幅
+    if (S.evoBanner > 0) {
+      var ea = clamp(S.evoBanner / 2.8, 0, 1);
+      var evoName = S.evolved === 'rift' ? '裂空' : '星爆';
+      var evoSub = S.evolved === 'rift' ? '命中点爆炸 · 穿透弹道' : '命中分裂 · 脉冲散射融合';
+      ctx.save();
+      ctx.globalAlpha = ea * 0.9;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffd45e';
+      ctx.font = '600 12px ' + FONT;
+      ctx.fillText('WEAPON EVOLUTION', W / 2, H / 2 - 168);
+      ctx.font = '800 34px ' + FONT;
+      ctx.shadowColor = '#ffd45e';
+      ctx.shadowBlur = 22;
+      ctx.fillText(evoName, W / 2, H / 2 - 134);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(220, 235, 255, 0.6)';
+      ctx.font = '500 12px ' + FONT;
+      ctx.fillText(evoSub, W / 2, H / 2 - 108);
+      ctx.restore();
+    }
+
     // 分数
     ctx.textAlign = 'center';
     ctx.fillStyle = COL.text;
@@ -2864,9 +3004,9 @@
         S.combo > 0 ? '#ffd45e' : 'rgba(120, 150, 200, 0.25)');
 
     ctx.font = '600 12px ' + FONT;
-    ctx.fillStyle = '#8fb8ff';
+    ctx.fillStyle = S.evolved ? '#ffd45e' : '#8fb8ff';
     ctx.fillText(
-      'WPN ' + w.name + ' · ' + (1 / fireInterval()).toFixed(1) + ' 发/s · ' +
+      'WPN ' + w.name + (S.evolved ? ' · EVO' : '') + ' · ' + (1 / fireInterval()).toFixed(1) + ' 发/s · ' +
       pellets() + ' 弹 · 伤害 ' + damage().toFixed(1),
       cx, H - 46
     );
@@ -3525,6 +3665,7 @@
     else if (S.mode === 'dead') updateDeath(dt);
     else if (S.mode === 'intro') updateIntro(dt);
     else if (S.mode === 'reward') updateReward(dt);
+    else if (S.mode === 'evolution') updateEvolution(dt);
     else if (S.mode === 'upgrade') updateUpgrade(dt);
     else if (S.mode === 'select') S.selectT += dt;
     if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
@@ -3707,7 +3848,8 @@
     playerDpsEstimate: playerDpsEstimate,
     spawnBoss: spawnBoss, damageBoss: damageBoss, fireBossRing: fireBossRing,
     applyUpgrade: applyUpgrade, chooseUpgrade: chooseUpgrade, rollUpgrades: rollUpgrades,
-    updateUpgrade: updateUpgrade, updateReward: updateReward, UPGRADE_DEFS: UPGRADE_DEFS,
+    updateUpgrade: updateUpgrade, updateReward: updateReward, updateEvolution: updateEvolution,
+    UPGRADE_DEFS: UPGRADE_DEFS,
     spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
     selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
     ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
