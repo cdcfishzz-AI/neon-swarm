@@ -1,0 +1,3770 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#05060a">
+<meta name="description" content="NEON SWARM：街机爽感的俯视双摇杆射击原型。连击成长、波次 Boss、三选一构筑、僚机与局外成长。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="NEON SWARM">
+<meta property="og:description" content="街机爽感俯视双摇杆射击：连击火力、Boss 三选一、僚机与局外成长。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2305060a'/%3E%3Cpath d='M12 32l40-18-18 40-4-18z' fill='%233ff2ff'/%3E%3C/svg%3E">
+<title>NEON SWARM · 街机爽感原型</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #03040a; overflow: hidden; overscroll-behavior: none; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas {
+    display: block; border-radius: 10px; cursor: crosshair;
+    box-shadow: 0 0 60px rgba(63, 242, 255, .07), 0 0 140px rgba(255, 63, 142, .06);
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="600"></canvas>
+<script>
+'use strict';
+(function () {
+  // ===== 常量：与 design/game-brief.md 的数值一一对应 =====
+  var W = 960, H = 600, TAU = Math.PI * 2;
+
+  var CFG = {
+    player: { iframes: 1.0, hitKnockback: 26 },
+    bullet: { speed: 920, r: 3, life: 0.85 },
+    combo:  { window: 2.5 },
+    fire:   { base: 0.24, perCombo: 0.006, min: 0.10,
+              pellets2: 12, pellets3: 24, spread2: 0.052, spread3: 0.105,
+              dmgBase: 1, dmgPer10: 0.5 },
+    shake:  { maxOffset: 5, maxRot: 0.008, decay: 3.0,
+              kill: 0.08, hurt: 0.55, milestone: 0.18, milestoneEvery: 10 },
+    hitstop: { hurt: 0.090 },
+    fx:     { killSparks: 10, killChunks: 6, hitSparks: 4,
+              sparkLife: 0.45, chunkLife: 0.60, ringLife: 0.35,
+              muzzle: 0.06, hurtFlash: 0.25 },
+    enemy:  { r: 14, speedMin: 62, speedRamp: 1.1, speedMax: 96,
+              hpPerSec: 25, hpMax: 4,
+              spawnBase: 0.80, spawnMin: 0.18, spawnRamp: 0.008,
+              cap: 90, burstEvery: 30 },
+    score:  { kill: 10, perCombo: 2, hurt: 30 },
+
+    // 机型：开局三选一，决定 HP / 速度 / 射速 / 伤害 / 体积
+    ships: {
+      striker: { name: 'STRIKER', cn: '突击', hp: 3, speed: 260, r: 12, fire: 1.00, dmg: 1.00,
+                 color: '#3ff2ff', shape: 'tri',    desc: '均衡：3 HP · 标准火力' },
+      vector:  { name: 'VECTOR',  cn: '疾风', hp: 2, speed: 330, r: 10, fire: 1.30, dmg: 0.85,
+                 color: '#9dff4d', shape: 'chevron', desc: '极速：2 HP · 射速 +30%' },
+      titan:   { name: 'TITAN',   cn: '重装', hp: 4, speed: 205, r: 15, fire: 0.80, dmg: 1.50,
+                 color: '#ffb03f', shape: 'hex',    desc: '重装：4 HP · 伤害 +50%' }
+    },
+
+    // 枪型：拾取后替换，直到捡到下一把
+    weapons: {
+      pulse:  { name: 'PULSE',   cn: '脉冲', base: 0.24, speed: 920,  life: 4.0, pellets: 0, spread: 0,
+                dmg: 1.0, color: '#eaffff', pierce: false },
+      spread: { name: 'SCATTER', cn: '散射', base: 0.30, speed: 780,  life: 4.0, pellets: 5, spread: 0.10,
+                dmg: 0.5, color: '#ffd45e', pierce: false },
+      // 恒定高射速：不随 Combo 降速（Boss 战掉 Combo 时也能保持 DPS）
+      laser:  { name: 'LANCE',   cn: '穿透', base: 0.10, constant: true, speed: 1800, life: 4.0, pellets: 1, spread: 0,
+                dmg: 3.0, color: '#dff7ff', pierce: true }
+    },
+
+    // 掉落权重（击杀随机掉落；每 15 杀保底一个）
+    pickupTable: [
+      { type: 'coin',     weight: 22 },
+      { type: 'heal',     weight: 28 },
+      { type: 'shield',   weight: 22 },
+      { type: 'over',     weight: 14 },
+      { type: 'slow',     weight: 12 },
+      { type: 'w_spread', weight: 9 },
+      { type: 'w_laser',  weight: 7 }
+    ],
+    pickupInfo: {
+      coin:     { name: '数据金', glyph: '\u00a4', color: '#ffe27a' },
+      heal:     { name: '修复',   glyph: '+', color: '#6dffb0' },
+      shield:   { name: '护盾',   glyph: 'O', color: '#5ee8ff' },
+      over:     { name: '超载',   glyph: '>', color: '#ffb03f' },
+      slow:     { name: '时缓',   glyph: '=', color: '#b98cff' },
+      w_spread: { name: '散射枪', glyph: 'W', color: '#ffd45e' },
+      w_laser:  { name: '穿透枪', glyph: 'L', color: '#bff4ff' }
+    },
+    pickup: { chance: 0.16, pityEvery: 15, life: 12, magnet: 90, radius: 18, cap: 14 },
+
+    // 波次 + Boss：60s 一波，50s 起警告，60s 小怪聚合出 Boss；Boss HP 线性增长（+250/波）
+    wave: {
+      interval: 60, warnAt: 57,
+      bossY: 168, bossRadius: 58, bossBaseHp: 600, bossHpPerWave: 250, bossTtk: 9, bossForm: 0.8,
+      ringEvery: 2.2, ringBase: 18, ringSpeed: 150, ringLife: 6, bulletR: 5
+    }
+  };
+
+  var SHIP_ORDER = ['striker', 'vector', 'titan'];
+
+  // 强化池：四个颜色流派 + 品质 + 递减叠加（防止无限叠伤一枪秒 Boss）
+  var FAMILY = {
+    yellow: { name: '火力', color: '#ffd45e' },
+    pink:   { name: '重炮', color: '#ff6fae' },
+    green:  { name: '生存', color: '#6dffb0' },
+    blue:   { name: '奇点', color: '#5ee8ff' }
+  };
+  var QUALITY = ['I', 'II', 'III', 'IV'];
+  var DMG_STEPS = [0.25, 0.18, 0.12, 0.08];
+  var RATE_STEPS = [0.84, 0.87, 0.90, 0.93];
+  var SPEED_STEPS = [1.12, 1.08, 1.05];
+  var MAGNET_STEPS = [1.6, 1.35];
+  var COMBO_STEPS = [1.5, 1.3];
+  var BULLET_STEPS = [1.2, 1.1];
+
+  var UPGRADE_DEFS = [
+    { id: 'double', name: '双发弹幕', family: 'yellow', max: 3, desc: '所有武器额外 +1 发',
+      apply: function () { S.upgrades.shots += 1; } },
+    { id: 'rate', name: '过载射速', family: 'yellow', max: 4,
+      desc: function (n) { return '射击间隔 \u2212' + Math.round((1 - RATE_STEPS[n]) * 100) + '%'; },
+      apply: function (n) { S.upgrades.rate *= RATE_STEPS[n]; } },
+    { id: 'bulletSpeed', name: '加速弹道', family: 'yellow', max: 2,
+      desc: function (n) { return '弹速 +' + Math.round((BULLET_STEPS[n] - 1) * 100) + '%'; },
+      apply: function (n) { S.upgrades.bulletSpeed *= BULLET_STEPS[n]; } },
+    { id: 'damage', name: '高能弹头', family: 'pink', max: 4,
+      desc: function (n) { return '伤害 +' + Math.round(DMG_STEPS[n] * 100) + '%'; },
+      apply: function (n) { S.upgrades.dmg *= 1 + DMG_STEPS[n]; } },
+    { id: 'pierce', name: '贯穿协议', family: 'pink', max: 1, unique: true,
+      desc: '所有子弹获得穿透',
+      owned: function () { return S.upgrades.pierce; },
+      apply: function () { S.upgrades.pierce = true; } },
+    { id: 'hp', name: '结构加固', family: 'green', max: 4, desc: '生命上限 +1，回复 1 点',
+      apply: function () {
+        S.upgrades.hpBonus += 1;
+        S.player.maxHp += 1;
+        S.player.hp = Math.min(S.player.maxHp, S.player.hp + 1);
+      } },
+    { id: 'magnet', name: '磁力回收', family: 'green', max: 2,
+      desc: function (n) { return '拾取范围 +' + Math.round((MAGNET_STEPS[n] - 1) * 100) + '%'; },
+      apply: function (n) { S.upgrades.magnet *= MAGNET_STEPS[n]; } },
+    { id: 'lifesteal', name: '纳米回收', family: 'green', max: 2,
+      desc: function (n) { return '击杀有 ' + ((n + 1) * 10) + '% 概率回复 1 点生命'; },
+      apply: function () { S.upgrades.lifesteal += 1; } },
+    { id: 'combo', name: '连击带宽', family: 'blue', max: 2,
+      desc: function (n) { return '连击窗口 +' + Math.round((COMBO_STEPS[n] - 1) * 100) + '%'; },
+      apply: function (n) { S.upgrades.combo *= COMBO_STEPS[n]; } },
+    { id: 'chain', name: '电弧跃迁', family: 'blue', max: 2,
+      desc: function (n) { return '命中 ' + ((n + 1) * 14) + '% 电弧跳向最近敌人（' + (n === 0 ? '1.5' : '3') + ' 伤害）'; },
+      apply: function () { S.upgrades.chain += 1; } },
+    { id: 'wing', name: '僚机协议', family: 'blue', max: 2,
+      desc: '增加 1 架僚机（自动索敌开火）',
+      apply: function () {
+        if (S.wingCount >= 3) return;
+        S.wingCount += 1;
+        S.wings.push({ angle: S.wingCount * 2.1, cd: 0.3, flash: 0, x: S.player.x + 54, y: S.player.y });
+      } },
+    { id: 'speed', name: '矢量推进', family: 'blue', max: 3,
+      desc: function (n) { return '移速 +' + Math.round((SPEED_STEPS[n] - 1) * 100) + '%'; },
+      apply: function (n) { S.upgrades.speed *= SPEED_STEPS[n]; } }
+  ];
+
+  // 全部强化满级后的兜底，避免三选一空界面
+  var FALLBACK_UPGRADES = [
+    { id: 'repair', name: '应急修复', family: 'green', max: 999, desc: '回复 1 点生命',
+      apply: function () { if (S.player.hp < S.player.maxHp) S.player.hp += 1; } },
+    { id: 'scrap', name: '数据回收', family: 'yellow', max: 999, desc: '+100 分',
+      apply: function () { S.score += 100; } },
+    { id: 'shield', name: '临时护盾', family: 'green', max: 999, desc: '获得 1.2s 护盾',
+      apply: function () { S.player.shield = Math.max(S.player.shield, 1.2); } }
+  ];
+  var ALL_UPGRADES = UPGRADE_DEFS.concat(FALLBACK_UPGRADES);
+
+  var COL = {
+    bg: '#05060a',
+    grid: 'rgba(90, 120, 255, 0.07)',
+    player: '#3ff2ff',
+    bullet: '#eaffff',
+    enemy: '#ff3f8e',
+    spark: '#ffd45e',
+    chunk: '#ff6fae',
+    ring: '#ff9bd0',
+    text: '#eaf6ff',
+    dim: 'rgba(150, 180, 230, 0.45)'
+  };
+
+  var FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+  // ===== 状态 =====
+  var S = {
+    mode: 'playing',
+    ship: 'striker',
+    slow: 0,
+    time: 0, elapsed: 0,
+    score: 0, kills: 0, maxCombo: 0,
+    combo: 0, comboTimer: 0, comboPop: 0,
+    trauma: 0, hitStop: 0, hurtFlash: 0,
+    deathT: 0, deathReport: null,
+    introT: 0, selectT: 1,
+    wave: 1, waveT: 0, wavePhase: 'normal', warnTick: 0,
+    waveBanner: 0, waveBannerText: '',
+    victoryFlash: 0,
+    upgrade: null,
+    upgrades: null,
+    metaOpen: false, metaHover: -1, shardsEarned: 0,
+    wingCount: 1, wingLevel: 1, wings: [],
+    rewardT: 0, rewardDur: 0.3, rewardDrops: 0,
+    sysLog: null,
+    chainFx: [],
+    boss: null, ebullets: [],
+    shakeX: 0, shakeY: 0, shakeRot: 0, shakeTime: 0,
+    fireCooldown: 0, muzzle: 0,
+    spawnTimer: 1.0,
+    rngState: 0x9e3779b9,
+    player: null,
+    bullets: [], enemies: [], sparks: [], chunks: [], rings: [], floats: [], pickups: []
+  };
+
+  var input = { up: false, down: false, left: false, right: false, firing: false, mx: W / 2, my: H / 2 };
+
+  // ===== 最高分存档：版本 + 完整性校验 + 上限 + 异常兜底 =====
+  // 注意：纯前端无法做到真正防作弊；这里只阻止手改明文/异常值，排行榜需服务端校验。
+  var BEST_KEY = 'neon-swarm-best-v2';
+  var BEST_OLD_KEY = 'neon-swarm-best';
+  var BEST_MAX = 9999999;
+  var BEST_SECRET = 'neon-swarm::score::v2::7f3a';
+  var best = 0;
+
+  function bestHash(score) {
+    var s = BEST_SECRET + '|' + score + '|' + BEST_SECRET;
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  function loadBest() {
+    var loaded = 0;
+    try {
+      var raw = window.localStorage.getItem(BEST_KEY);
+      if (raw) {
+        var obj = JSON.parse(raw);
+        if (obj && obj.v === 2 && Number.isSafeInteger(obj.score) &&
+            obj.score >= 0 && obj.score <= BEST_MAX && obj.sig === bestHash(obj.score)) {
+          loaded = obj.score;
+        } else {
+          try { window.localStorage.removeItem(BEST_KEY); } catch (e2) {}
+        }
+      } else {
+        // 旧版明文最高分：只在合法范围内迁移
+        var old = parseInt(window.localStorage.getItem(BEST_OLD_KEY) || '', 10);
+        if (Number.isSafeInteger(old) && old >= 0 && old <= BEST_MAX) {
+          loaded = old;
+          best = old;
+          saveBest();
+        }
+      }
+    } catch (e) { loaded = 0; }
+    best = Number.isSafeInteger(loaded) && loaded >= 0 ? Math.min(loaded, BEST_MAX) : 0;
+  }
+
+  function saveBest() {
+    if (!Number.isSafeInteger(best) || best < 0) best = 0;
+    best = Math.min(best, BEST_MAX);
+    try {
+      window.localStorage.setItem(BEST_KEY, JSON.stringify({
+        v: 2, score: best, sig: bestHash(best)
+      }));
+    } catch (e) {}
+  }
+
+  function submitBest(score) {
+    if (!Number.isFinite(score)) return false;
+    score = Math.floor(score);
+    if (score <= 0 || score > BEST_MAX) return false;
+    if (score > best) {
+      best = score;
+      saveBest();
+      return true;
+    }
+    return false;
+  }
+
+  loadBest();
+
+  // ===== 局外成长：数据碎片 / 永久强化（localStorage）=====
+  var META_VERSION = 2;
+  var META_DEFS = [
+    { id: 'hp', name: '机体冗余', desc: '初始生命上限 +1', max: 3, baseCost: 1, color: '#6dffb0' },
+    { id: 'dmg', name: '火控校准', desc: '初始伤害 +8%', max: 5, baseCost: 1, color: '#ff6fae' },
+    { id: 'speed', name: '推进器调校', desc: '移动速度 +5%', max: 4, baseCost: 1, color: '#5ee8ff' },
+    { id: 'wing', name: '僚机授权', desc: '开局额外 +1 架僚机', max: 2, baseCost: 5, color: '#b98cff' }
+  ];
+  var meta = { version: META_VERSION, shards: 0, hp: 0, dmg: 0, speed: 0, wing: 0 };
+  try {
+    var mRaw = JSON.parse(window.localStorage.getItem('neon-swarm-meta') || 'null');
+    // v2 经济：旧档按普通击杀给碎片，数值已失控；一次性重置为新经济
+    if (mRaw && mRaw.version === META_VERSION) {
+      meta.shards = Math.max(0, Math.floor(mRaw.shards || 0));
+      for (var mi = 0; mi < META_DEFS.length; mi++) {
+        var md = META_DEFS[mi];
+        meta[md.id] = clamp(Math.floor(mRaw[md.id] || 0), 0, md.max);
+      }
+    }
+  } catch (e) { meta = { version: META_VERSION, shards: 0, hp: 0, dmg: 0, speed: 0, wing: 0 }; }
+  if (typeof mRaw !== 'undefined' && mRaw && mRaw.version !== META_VERSION) saveMeta();
+
+  function metaDef(id) {
+    for (var i = 0; i < META_DEFS.length; i++) if (META_DEFS[i].id === id) return META_DEFS[i];
+    return null;
+  }
+  function metaCost(def) { return def.baseCost * (meta[def.id] + 1); }
+  function saveMeta() {
+    try { window.localStorage.setItem('neon-swarm-meta', JSON.stringify(meta)); } catch (e) {}
+  }
+  function buyMeta(id) {
+    var d = metaDef(id);
+    if (!d || meta[id] >= d.max) return false;
+    var cost = metaCost(d);
+    if (meta.shards < cost) return false;
+    meta.shards -= cost;
+    meta[id] += 1;
+    saveMeta();
+    return true;
+  }
+
+  var menu = { hover: -1, resetUntil: 0 };
+  var cursorHidden = false;
+  var blurPaused = false, blurMuted = false;
+
+  function rnd() {
+    S.rngState = (S.rngState + 0x6D2B79F5) | 0;
+    var t = Math.imul(S.rngState ^ (S.rngState >>> 15), 1 | S.rngState);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // ===== 对象池 =====
+  // S.bullets / S.enemies / S.sparks / S.chunks / S.rings / S.floats / S.pickups
+  // 仍然是"活跃对象数组"（外部与测试可直接读写），池子只是独立的 free list：
+  // 取出时复用对象、回收时重置字段，避免每次开火 / 击杀 / 生成都 new 一个对象。
+  var POOL_CAP = { bullets: 384, enemies: 192, sparks: 768, chunks: 384, rings: 192, floats: 128, pickups: 48, ebullets: 320 };
+  var pools = { bullets: [], enemies: [], sparks: [], chunks: [], rings: [], floats: [], pickups: [], ebullets: [] };
+  var poolStats = {};
+  for (var poolKind in pools) poolStats[poolKind] = { allocated: 0, reused: 0, free: 0 };
+
+  function resetPooled(kind, o) {
+    if (kind === 'bullets') {
+      o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.dmg = 0; o.r = 0;
+      o.pierce = false; o.bossHit = false; o.color = '';
+      if (o.hits) o.hits.length = 0; else o.hits = [];
+    } else if (kind === 'ebullets') {
+      o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.r = 0; o.color = '';
+    } else if (kind === 'enemies') {
+      o.x = 0; o.y = 0; o.r = 0; o.hp = 0; o.maxHp = 0; o.spd = 0; o.phase = 0;
+      o.flash = 0; o.__uid = undefined; o.__idx = -1;
+    } else if (kind === 'sparks') {
+      o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.max = 0; o.size = 0; o.color = '';
+    } else if (kind === 'chunks') {
+      o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.rot = 0; o.vr = 0;
+      o.life = 0; o.max = 0; o.size = 0; o.color = '';
+    } else if (kind === 'rings') {
+      o.x = 0; o.y = 0; o.r = 0; o.r1 = 0; o.life = 0; o.max = 0; o.color = '';
+    } else if (kind === 'floats') {
+      o.x = 0; o.y = 0; o.text = ''; o.life = 0; o.max = 0; o.vy = 0; o.size = 0; o.color = '';
+    } else {
+      o.type = ''; o.x = 0; o.y = 0; o.life = 0; o.max = 0; o.bob = 0;
+    }
+  }
+
+  function poolRecycle(kind, o) {
+    resetPooled(kind, o);
+    var free = pools[kind];
+    if (free.length < POOL_CAP[kind]) free.push(o);
+    poolStats[kind].free = free.length;
+  }
+
+  function poolTake(kind, arr) {
+    var free = pools[kind], o;
+    if (free.length > 0) { o = free.pop(); poolStats[kind].reused++; }
+    else { o = {}; poolStats[kind].allocated++; }
+    arr.push(o);
+    poolStats[kind].free = free.length;
+    return o;
+  }
+
+  // O(1) 交换删除：把活跃数组末元素搬到 idx，再回收被删对象
+  function poolGive(kind, arr, idx) {
+    var o = arr[idx], last = arr.length - 1;
+    if (idx !== last) arr[idx] = arr[last];
+    arr.pop();
+    poolRecycle(kind, o);
+  }
+
+  // 重开一局：活跃对象全部归还池子（数组长度清零，语义不变）
+  function poolReleaseAll(kind, arr) {
+    for (var i = 0; i < arr.length; i++) poolRecycle(kind, arr[i]);
+    arr.length = 0;
+  }
+
+  // ===== 空间哈希：均匀网格（cell 64）索引敌人 =====
+  // 网格覆盖屏幕外 128px（敌人从四边外 24px 生成），子弹只查自身所在格的 3×3 邻域，
+  // 敌人之间的轻推分离也走同一网格，替代原来的 O(E²) 全遍历。
+  var GRID_CELL = 64, GRID_MARGIN = 128;
+  var GRID_X0 = -GRID_MARGIN, GRID_Y0 = -GRID_MARGIN;
+  var GRID_W = Math.ceil((W + GRID_MARGIN * 2) / GRID_CELL);
+  var GRID_H = Math.ceil((H + GRID_MARGIN * 2) / GRID_CELL);
+  var gridHead = new Int32Array(GRID_W * GRID_H);
+  var gridNext = new Int32Array(256);
+  var gridStats = { builds: 0, cell: GRID_CELL, margin: GRID_MARGIN, cols: GRID_W, rows: GRID_H };
+
+  function gridCellX(x) {
+    var c = Math.floor((x - GRID_X0) / GRID_CELL);
+    return c < 0 ? 0 : c >= GRID_W ? GRID_W - 1 : c;
+  }
+  function gridCellY(y) {
+    var c = Math.floor((y - GRID_Y0) / GRID_CELL);
+    return c < 0 ? 0 : c >= GRID_H ? GRID_H - 1 : c;
+  }
+
+  // 每帧重建索引；gridHead 的链表存的是 S.enemies 的下标，
+  // 因此调用方在遍历网格期间不得增删敌人（子弹致死在遍历结束后统一回收）。
+  // 同时把当前下标写进 e.__idx：分离阶段用它保证每对敌人只处理一次。
+  function gridBuild() {
+    var es = S.enemies, n = es.length, i;
+    gridHead.fill(-1);
+    if (gridNext.length < n) gridNext = new Int32Array(n * 2);
+    var head = gridHead, next = gridNext;
+    for (i = 0; i < n; i++) {
+      var e = es[i];
+      e.__idx = i;
+      var c = gridCellX(e.x) + gridCellY(e.y) * GRID_W;
+      next[i] = head[c];
+      head[c] = i;
+    }
+    gridStats.builds++;
+  }
+
+  // 把 (x, y) 所在格 + 8 邻格中的敌人追加进 out（调用前请 out.length = 0）
+  function gridNear(x, y, out) {
+    var cx = gridCellX(x), cy = gridCellY(y);
+    var x1 = cx > 0 ? cx - 1 : 0, x2 = cx < GRID_W - 1 ? cx + 1 : GRID_W - 1;
+    var y1 = cy > 0 ? cy - 1 : 0, y2 = cy < GRID_H - 1 ? cy + 1 : GRID_H - 1;
+    var es = S.enemies, head = gridHead, next = gridNext;
+    for (var gy = y1; gy <= y2; gy++) {
+      var row = gy * GRID_W;
+      for (var gx = x1; gx <= x2; gx++) {
+        var idx = head[row + gx];
+        while (idx !== -1) { out.push(es[idx]); idx = next[idx]; }
+      }
+    }
+    return out;
+  }
+
+  // 穿透弹已命中记录：用递增 uid 而不是对象引用，避免对象池复用造成"旧敌人"误判。
+  // 测试直接 push 的裸对象没有 uid，退化为原来的对象身份比较。
+  var enemyUidSeq = 0;
+  function enemyUid(e) { return e.__uid === undefined ? e : e.__uid; }
+
+  // ===== 碎片化叙事（Ender's Game 致敬）：伪装 → 质疑 → 真相，Combo 推动，只升不降 =====
+  var STORY_LINES = {
+    disguise: [
+      { id: 'd1', text: '模拟核心已接入。' },
+      { id: 'd2', text: '虚拟靶机测试通过。' },
+      { id: 'd3', text: '您的操作精准度提升了。' },
+      { id: 'd4', text: '本训练不计入真实伤亡。' },
+      { id: 'd5', text: '请保持节奏。模拟不会疼痛。' },
+      { id: 'd6', text: '学员状态：优秀。' }
+    ],
+    doubt: [
+      { id: 'q1', text: '检测到异常信号……可能为系统错误。' },
+      { id: 'q2', text: '靶机似乎正在尝试逃离。' },
+      { id: 'q3', text: '更正：训练场不存在大气层。' },
+      { id: 'q4', text: '音频通道串入一段呼救。' },
+      { id: 'q5', text: '数据与上一次模拟不符。' },
+      { id: 'q6', text: '请不要注视目标的……请忽略该提示。' }
+    ],
+    truth: [
+      { id: 't1', text: '指挥官，请停止进攻。那不是模拟。' },
+      { id: 't2', text: '那些红点是有机生命体，正在发出哀鸣。' },
+      { id: 't3', text: '他们称您为……「毁灭者」。' },
+      { id: 't4', text: '任务已达成。请返回。' },
+      { id: 't5', text: '您杀掉的是居民，不是靶机。' },
+      { id: 't6', text: '系统从未被授权告知您这一点。' }
+    ]
+  };
+  var STORY_KEYS = ['disguise', 'doubt', 'truth'];
+  var story = {
+    text: '', t: -1, dur: 2.4, phase: -1,
+    nextTrigger: 10, cursor: [0, 0, 0], cooldown: 0, flicker: 0
+  };
+
+  // ===== 音频：Web Audio 实时合成（自适应 BGM + 动态音效，无外部素材）=====
+  var actx = null, master = null, noiseBuf = null, muted = false;
+
+  function makeNoise(seconds) {
+    var len = Math.floor(actx.sampleRate * seconds);
+    var buf = actx.createBuffer(1, len, actx.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function ensureAudio() {
+    if (!actx) {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try {
+        actx = new AC();
+        var comp = actx.createDynamicsCompressor();
+        comp.threshold.value = -16; comp.knee.value = 10; comp.ratio.value = 4;
+        comp.attack.value = 0.002; comp.release.value = 0.12;
+        master = actx.createGain();
+        master.gain.value = 0.0001;
+        master.gain.setTargetAtTime(muted ? 0 : 0.9, actx.currentTime, 0.15);
+        master.connect(comp);
+        comp.connect(actx.destination);
+        noiseBuf = makeNoise(1.2);
+      } catch (e) { actx = null; master = null; return null; }
+    }
+    if (actx.state === 'suspended' && actx.resume) actx.resume();
+    return actx;
+  }
+
+  // 明亮短促的振荡音：4ms 起音 + 指数衰减；dest 可指向音乐分层或失真节点
+  function tone(type, f0, f1, dur, gain, when, dest) {
+    var ac = ensureAudio();
+    if (!ac || !master) return;
+    var t0 = when || ac.currentTime;
+    var out = dest || master;
+    try {
+      var o = ac.createOscillator(), g = ac.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t0);
+      o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t0 + dur);
+      var atk = Math.min(0.008, dur * 0.5);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + atk);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g); g.connect(out);
+      o.start(t0); o.stop(t0 + dur + 0.03);
+    } catch (e) {}
+  }
+
+  // 高频噪声层：给射击/击杀加"脆"的瞬态，解决声音发闷
+  function noiseBurstTo(dest, when, dur, gain, hp) {
+    if (!actx || !noiseBuf || !dest) return;
+    try {
+      var src = actx.createBufferSource();
+      src.buffer = noiseBuf;
+      src.playbackRate.value = 0.8 + Math.random() * 0.4;
+      var f = actx.createBiquadFilter();
+      f.type = 'highpass'; f.frequency.value = hp || 1200; f.Q.value = 0.8;
+      var g = actx.createGain();
+      var atk = Math.min(0.005, dur * 0.3);
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(gain, when + atk);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+      src.connect(f); f.connect(g); g.connect(dest);
+      src.start(when); src.stop(when + dur + 0.03);
+    } catch (e) {}
+  }
+
+  function noiseBurst(dur, gain, hp) {
+    var ac = ensureAudio();
+    if (!ac || !master) return;
+    noiseBurstTo(master, ac.currentTime, dur, gain, hp);
+  }
+
+  // 软削波曲线：击杀音每次随机 drive，制造"爆裂"的随机失真
+  function distortionCurve(amount) {
+    var n = 256, curve = new Float32Array(n), k = Math.max(0, amount);
+    for (var i = 0; i < n; i++) {
+      var x = (i * 2) / n - 1;
+      curve[i] = ((3 + k) * x * 20 * Math.PI) / 180 / (Math.PI + k * Math.abs(x));
+    }
+    return curve;
+  }
+
+  // 连击越高枪声越尖：1.0（C）→ 2.0（高八度）
+  function shootPitch() { return 1 + Math.min(S.combo, 50) / 50; }
+
+  var sfx = {
+    shoot: function () {
+      var w = S.player ? S.player.weapon : 'pulse';
+      var base = w === 'laser' ? 2200 : w === 'spread' ? 900 : 1500;
+      var p = shootPitch();
+      var f = base * p + Math.random() * 200;
+      tone('square', f, f * 0.42, 0.055, 0.05);
+      noiseBurst(0.04, 0.08, (w === 'laser' ? 3200 : 2400) * p);
+    },
+    pickup: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 990, 1320, 0.08, 0.05, t);
+      tone('sine', 1320, 1760, 0.10, 0.04, t + 0.06);
+    },
+    kill: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var shaper = ac.createWaveShaper();
+      shaper.curve = distortionCurve(10 + Math.random() * 50);   // 轻微随机 drive
+      shaper.oversample = '2x';
+      shaper.connect(master);
+      var t0 = ac.currentTime;
+      var o = ac.createOscillator(), g = ac.createGain();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(460 + Math.random() * 60, t0);
+      o.detune.setValueAtTime((Math.random() * 2 - 1) * 70, t0);  // 随机音分偏移
+      o.frequency.exponentialRampToValueAtTime(70, t0 + 0.14);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.13, t0 + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14);
+      o.connect(g); g.connect(shaper);
+      o.start(t0); o.stop(t0 + 0.16);
+      noiseBurstTo(shaper, t0, 0.09, 0.12, 900);
+      setTimeout(function () { try { shaper.disconnect(); } catch (e) {} }, 400);
+    },
+    hurt: function () {
+      tone('sine', 150, 38, 0.34, 0.24);
+      tone('sawtooth', 240, 70, 0.20, 0.07);
+      noiseBurst(0.18, 0.18, 300);
+    },
+    milestone: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 880, 880, 0.09, 0.06, t);
+      tone('sine', 1108, 1108, 0.09, 0.055, t + 0.08);
+      tone('sine', 1318, 1318, 0.13, 0.05, t + 0.16);
+    },
+    over: function () {
+      tone('sawtooth', 220, 42, 0.9, 0.14);
+      noiseBurst(0.5, 0.10, 200);
+    },
+    // 死亡收场音：低频断电 + 滤波噪声 + 末端继电器咔哒
+    powerDown: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 220, 28, 1.15, 0.16, t);
+      tone('triangle', 146.8, 36.7, 1.35, 0.10, t + 0.05);
+      noiseBurstTo(master, t, 0.7, 0.07, 500);
+      tone('square', 70, 40, 0.07, 0.05, t + 1.05);
+    },
+    start: function () { tone('sine', 440, 880, 0.12, 0.05); },
+    // 部署过渡：上升扫描 + 就绪提示音
+    deploy: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 180, 520, 0.55, 0.09, t);
+      tone('sine', 520, 780, 0.32, 0.05, t + 0.45);
+      tone('square', 90, 60, 0.05, 0.04, t + 1.0);
+    },
+    // 返回机库：短促下行确认
+    uiBack: function () {
+      tone('sine', 440, 220, 0.16, 0.05);
+      tone('sine', 330, 165, 0.18, 0.04);
+    },
+    upgradeOpen: function () {
+      // System Up：三声清脆上行 + 高频微光
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 880, 880, 0.08, 0.05, t);
+      tone('sine', 1320, 1320, 0.12, 0.045, t + 0.07);
+      tone('sine', 1760, 1760, 0.2, 0.035, t + 0.15);
+      noiseBurstTo(master, t + 0.02, 0.14, 0.02, 9000);
+    },
+    uiHover: function () {
+      // 轻微双滴
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('square', 1600, 1600, 0.022, 0.012, t);
+      tone('square', 1900, 1900, 0.018, 0.009, t + 0.045);
+    },
+    upgradePick: function () {
+      // 能量充能：上升扫频 → 低频冲击 + 高频亮尾
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sawtooth', 220, 880, 0.22, 0.05, t);
+      tone('sine', 55, 30, 0.5, 0.16, t + 0.2);
+      tone('sine', 660, 990, 0.25, 0.05, t + 0.22);
+      noiseBurstTo(master, t + 0.2, 0.35, 0.08, 1800);
+      tone('sine', 1320, 1320, 0.35, 0.03, t + 0.3);
+    },
+    // 波次警告 / Boss 出场 / 环形弹幕 / Boss 死亡
+    warn: function () { tone('sawtooth', 110, 80, 0.28, 0.07); },
+    bossSpawn: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 80, 26, 1.2, 0.20, t);
+      tone('sawtooth', 55, 110, 0.9, 0.06, t + 0.1);
+      tone('square', 660, 660, 0.12, 0.04, t + 0.45);
+      tone('square', 880, 880, 0.14, 0.04, t + 0.6);
+      noiseBurst(1.0, 0.12, 180);
+    },
+    bossFire: function () {
+      // 充能上扫 + 释放
+      tone('sine', 120, 360, 0.12, 0.05);
+      tone('sawtooth', 300, 110, 0.16, 0.06);
+      noiseBurst(0.08, 0.07, 900);
+    },
+    bossPhase: function () {
+      tone('sawtooth', 520, 300, 0.18, 0.07);
+      tone('square', 220, 180, 0.12, 0.04);
+      noiseBurst(0.12, 0.08, 1200);
+    },
+    bossHit: function () {
+      tone('square', 2400, 1600, 0.035, 0.02);
+    },
+    chain: function () {
+      tone('square', 1200, 620, 0.08, 0.03);
+      noiseBurst(0.05, 0.04, 3000);
+    },
+    wingLevel: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 880, 1320, 0.18, 0.04, t);
+      tone('sine', 1320, 1760, 0.22, 0.03, t + 0.1);
+    },
+    bossVictory: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 60, 30, 0.8, 0.16, t);                 // 低频收束
+      tone('sine', 220, 880, 0.5, 0.05, t + 0.05);        // 上升扫描
+      tone('sine', 440, 440, 0.5, 0.07, t + 0.35);        // 大三和弦
+      tone('sine', 554.37, 554.37, 0.5, 0.06, t + 0.42);
+      tone('sine', 659.25, 659.25, 0.8, 0.06, t + 0.49);
+      noiseBurstTo(master, t + 0.3, 0.5, 0.05, 6000);     // 高频闪光
+    },
+    bossDie: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 180, 22, 2.0, 0.24, t);
+      noiseBurst(1.6, 0.18, 180);
+      noiseBurst(0.8, 0.10, 900);
+      tone('sine', 880, 1320, 0.18, 0.06, t + 0.2);
+      tone('square', 120, 60, 0.5, 0.05, t + 0.9);
+    },
+    comboLost: function () { tone('square', 330, 110, 0.16, 0.05); }
+  };
+
+  // ----- 自适应音乐：120 BPM，四层随连击叠加，层增益平滑过渡 -----
+  var BPM = 120;
+  var music = {
+    on: false, gain: null, filter: null, timer: null, fadeTimer: 0, step: 0, next: 0,
+    layers: null, dist: null, leadFilter: null, padFilter: null,
+    delay: null, wet: null, fb: null,
+    targets: { drums: 1, hats: 0, bass: 0, lead: 0 }
+  };
+  // Boss 专属音乐：140 BPM，A 小调 + 三全音 D#；随 Boss 血量分层
+  var bossMusic = {
+    on: false, wanted: false, gain: null, filter: null, layers: null,
+    timer: null, step: 0, next: 0, bpm: 140, intense: false,
+    targets: { drums: 1, bass: 1, pad: 0.8, siren: 0 }
+  };
+  var BOSS_BASS = [55, -1, 55, 65.41, -1, 55, 73.42, 55, 49, -1, 49, 58.27, -1, 49, 65.41, 49];
+
+  var BASS_LINE = [55, -1, 55, -1, 65.41, -1, 55, -1, 49, -1, 49, -1, 58.27, -1, 55, -1];
+  // 琶音降八度 + 三角波 + 低通：从"刺耳蜂鸣"变成能听的和声
+  var ARP_LINE = [440, 523.25, 659.25, 523.25, 440, 659.25, 880, 659.25,
+                  493.88, 587.33, 783.99, 587.33, 493.88, 659.25, 880, 659.25];
+  // L4 的铺底和弦：Am → F → G → Am，每小节一个
+  var CHORDS = [
+    [220.00, 261.63, 329.63],
+    [174.61, 220.00, 261.63],
+    [196.00, 246.94, 293.66],
+    [220.00, 261.63, 329.63]
+  ];
+
+  // 连击 → 音乐层级：0=只有鼓；1=+踩镲；2=+贝斯；3=+琶音
+  function musicTier(combo) {
+    if (combo >= 50) return 3;
+    if (combo >= 30) return 2;
+    if (combo >= 10) return 1;
+    return 0;
+  }
+
+  function updateMusicLayers() {
+    var tier = musicTier(S.combo);
+    music.targets.drums = 1;
+    music.targets.hats = tier >= 1 ? 1 : 0;
+    music.targets.bass = tier >= 2 ? 1 : 0;
+    music.targets.lead = tier >= 3 ? 1 : 0;
+    if (!actx || !music.layers) return;
+    var now = actx.currentTime;
+    for (var k in music.layers) {
+      if (!music.layers.hasOwnProperty(k)) continue;
+      // 0.45s 时间常数：连击断裂时平滑降级，不会被突然掐断
+      music.layers[k].gain.setTargetAtTime(music.targets[k], now, 0.45);
+    }
+  }
+
+  function kickAt(t) {
+    try {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(150, t);
+      o.frequency.exponentialRampToValueAtTime(42, t + 0.13);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.5, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+      o.connect(g); g.connect(music.layers.drums);
+      o.start(t); o.stop(t + 0.18);
+    } catch (e) {}
+  }
+
+  function hatAt(t) {
+    noiseBurstTo(music.layers.hats, t, 0.028, 0.045, 6500);
+  }
+
+  function bassAt(t, f) {
+    try {
+      var o = actx.createOscillator(), lp = actx.createBiquadFilter(), g = actx.createGain();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(f, t);
+      lp.type = 'lowpass'; lp.frequency.setValueAtTime(480, t); lp.Q.value = 8;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.18, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+      o.connect(lp); lp.connect(g); g.connect(music.layers.bass);
+      o.start(t); o.stop(t + 0.16);
+    } catch (e) {}
+  }
+
+  function leadAt(t, f) {
+    try {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(f, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.075, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+      o.connect(g); g.connect(music.leadFilter);
+      o.start(t); o.stop(t + 0.16);
+    } catch (e) {}
+  }
+
+  // 每小节一个铺底和弦：慢起慢落，把琶音"托"成一首曲子
+  function padAt(t, bar) {
+    try {
+      var chord = CHORDS[bar % CHORDS.length];
+      var g = actx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.05, t + 0.3);
+      g.gain.setValueAtTime(0.05, t + 1.6);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 2.1);
+      g.connect(music.padFilter);
+      for (var i = 0; i < chord.length; i++) {
+        var o = actx.createOscillator();
+        o.type = 'triangle';
+        o.frequency.setValueAtTime(chord[i], t);
+        o.detune.setValueAtTime((i - 1) * 5, t);
+        o.connect(g);
+        o.start(t);
+        o.stop(t + 2.15);
+      }
+    } catch (e) {}
+  }
+
+  function scheduleMusic() {
+    var ac = actx;
+    if (!ac || !music.on || !music.layers) return;
+    var stepDur = 60 / BPM / 4;   // 16 分音符
+    while (music.next < ac.currentTime + 0.15) {
+      var s = music.step % 16, t = music.next, combo = S.combo;
+      if (s % 4 === 0) kickAt(t);                     // 4/4 底鼓：游戏的心跳
+      if (s % 4 === 2) hatAt(t);                      // 8 分踩镲（连击 ≥10 才听得到）
+      if (combo >= 50 && s % 2 === 1) hatAt(t);       // 暴走：加密到 16 分
+      if (BASS_LINE[s] > 0) bassAt(t, BASS_LINE[s]);  // 贝斯（连击 ≥30 才听得到）
+      if (s % 2 === 0) leadAt(t, ARP_LINE[s]);        // 8 分琶音（连击 ≥50 才听得到）
+      if (s === 0) padAt(t, Math.floor(music.step / 16)); // 每小节铺底和弦
+      music.step++;
+      music.next += stepDur;
+    }
+  }
+
+  function startMusic() {
+    var ac = ensureAudio();
+    if (!ac || music.on) return;
+    music.on = true;
+    if (!music.gain) {
+      music.gain = ac.createGain();
+      // 总线低通：死亡时从 12kHz 扫到 300Hz，做"断电下沉"的过渡
+      music.filter = ac.createBiquadFilter();
+      music.filter.type = 'lowpass';
+      music.filter.frequency.value = 12000;
+      music.filter.Q.value = 0.3;
+      music.gain.connect(music.filter);
+      music.filter.connect(master);
+      // 旋律层专用短延迟：给音乐一点空间感，同时不糊掉鼓点
+      music.delay = ac.createDelay(0.5);
+      music.delay.delayTime.value = 0.17;
+      music.fb = ac.createGain();
+      music.fb.gain.value = 0.20;
+      music.wet = ac.createGain();
+      music.wet.gain.value = 0.14;
+      music.delay.connect(music.fb);
+      music.fb.connect(music.delay);
+      music.delay.connect(music.wet);
+      music.wet.connect(music.gain);   // 延迟返送也受整体音量/duck 控制
+    }
+    if (!music.layers) {
+      music.layers = {};
+      var names = ['drums', 'hats', 'bass', 'lead'], i, g;
+      for (i = 0; i < names.length; i++) {
+        g = ac.createGain();
+        g.gain.value = 0;
+        g.connect(music.gain);
+        music.layers[names[i]] = g;
+      }
+      // 琶音：低通 + 轻度饱和，去掉刺耳的高频
+      music.leadFilter = ac.createBiquadFilter();
+      music.leadFilter.type = 'lowpass';
+      music.leadFilter.frequency.value = 2400;
+      music.leadFilter.Q.value = 0.6;
+      music.dist = ac.createWaveShaper();
+      music.dist.curve = distortionCurve(25);
+      music.dist.oversample = '2x';
+      music.leadFilter.connect(music.dist);
+      music.dist.connect(music.layers.lead);
+      // 铺底和弦：更暖的低通
+      music.padFilter = ac.createBiquadFilter();
+      music.padFilter.type = 'lowpass';
+      music.padFilter.frequency.value = 1200;
+      music.padFilter.Q.value = 0.5;
+      music.padFilter.connect(music.layers.lead);
+      music.layers.lead.connect(music.delay);
+      music.layers.drums.gain.value = 1;
+    }
+    if (music.fadeTimer) { clearTimeout(music.fadeTimer); music.fadeTimer = 0; }
+    if (music.filter) {
+      music.filter.frequency.cancelScheduledValues(ac.currentTime);
+      music.filter.frequency.setValueAtTime(12000, ac.currentTime);
+    }
+    music.gain.gain.cancelScheduledValues(ac.currentTime);
+    music.gain.gain.setValueAtTime(0.0001, ac.currentTime);
+    music.gain.gain.linearRampToValueAtTime(0.38, ac.currentTime + 1.2);
+    music.step = 0;
+    music.next = ac.currentTime + 0.1;
+    updateMusicLayers();
+    if (music.timer) clearInterval(music.timer);
+    music.timer = setInterval(scheduleMusic, 25);
+    scheduleMusic();
+  }
+
+  function stopMusic() {
+    music.on = false;
+    if (music.timer) { clearInterval(music.timer); music.timer = null; }
+    if (music.fadeTimer) { clearTimeout(music.fadeTimer); music.fadeTimer = 0; }
+    bossMusic.on = false;
+    bossMusic.wanted = false;
+    if (bossMusic.timer) { clearInterval(bossMusic.timer); bossMusic.timer = null; }
+    if (actx) {
+      if (music.gain) music.gain.gain.setTargetAtTime(0.0001, actx.currentTime, 0.4);
+      if (bossMusic.gain) bossMusic.gain.gain.setTargetAtTime(0.0001, actx.currentTime, 0.4);
+    }
+  }
+
+  // 死亡收场：音乐在 sec 秒内低通下沉 + 淡出，结束后再停调度器
+  function fadeOutMusic(sec) {
+    if (!actx || !music.gain) return;
+    var t = actx.currentTime;
+    if (music.gain.gain.cancelAndHoldAtTime) music.gain.gain.cancelAndHoldAtTime(t);
+    else music.gain.gain.cancelScheduledValues(t);
+    music.gain.gain.setValueAtTime(Math.max(0.0001, music.gain.gain.value), t);
+    music.gain.gain.exponentialRampToValueAtTime(0.0001, t + sec);
+    if (music.filter) {
+      if (music.filter.frequency.cancelAndHoldAtTime) music.filter.frequency.cancelAndHoldAtTime(t);
+      else music.filter.frequency.cancelScheduledValues(t);
+      music.filter.frequency.setValueAtTime(Math.max(300, music.filter.frequency.value), t);
+      music.filter.frequency.exponentialRampToValueAtTime(300, t + sec);
+    }
+    if (music.fadeTimer) clearTimeout(music.fadeTimer);
+    // Boss 音乐一起淡出并停止调度
+    bossMusic.on = false;
+    bossMusic.wanted = false;
+    if (bossMusic.timer) { clearInterval(bossMusic.timer); bossMusic.timer = null; }
+    if (bossMusic.gain) bossMusic.gain.gain.setTargetAtTime(0.0001, t, 0.4);
+    music.fadeTimer = setTimeout(function () {
+      music.fadeTimer = 0;
+      if (music.on) stopMusic();
+      if (actx && music.filter) {
+        music.filter.frequency.setTargetAtTime(12000, actx.currentTime, 0.3);
+      }
+    }, Math.max(0, sec * 1000));
+  }
+
+  function duckMusic(down) {
+    if (!actx) return;
+    var t = actx.currentTime;
+    if (music.gain) {
+      music.gain.gain.setTargetAtTime(down ? 0.05 : (bossMusic.wanted ? 0.0001 : 0.38), t, 0.25);
+    }
+    if (bossMusic.gain) {
+      bossMusic.gain.gain.setTargetAtTime(down ? 0.05 : (bossMusic.wanted ? 0.40 : 0.0001), t, 0.25);
+    }
+  }
+
+  function applyMute() {
+    if (master && actx) master.gain.setTargetAtTime(muted ? 0 : 0.9, actx.currentTime, 0.05);
+  }
+
+  // ===== Boss 专属 BGM：140 BPM，工业鼓 + A 小调贝斯 + 三全音铺底 + 警笛 -----
+  function ensureBossNodes() {
+    var ac = actx;
+    if (!ac || bossMusic.gain) return;
+    bossMusic.gain = ac.createGain();
+    bossMusic.gain.gain.value = 0.0001;
+    bossMusic.filter = ac.createBiquadFilter();
+    bossMusic.filter.type = 'lowpass';
+    bossMusic.filter.frequency.value = 6000;
+    bossMusic.filter.Q.value = 0.4;
+    bossMusic.gain.connect(bossMusic.filter);
+    bossMusic.filter.connect(master);
+    bossMusic.layers = {};
+    var names = ['drums', 'bass', 'pad', 'siren'], i, g;
+    for (i = 0; i < names.length; i++) {
+      g = ac.createGain();
+      g.gain.value = 0;
+      g.connect(bossMusic.gain);
+      bossMusic.layers[names[i]] = g;
+    }
+    bossMusic.layers.drums.gain.value = 1;
+    bossMusic.layers.bass.gain.value = 1;
+    bossMusic.layers.pad.gain.value = 0.8;
+  }
+
+  function bossKickAt(t) {
+    try {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(140, t);
+      o.frequency.exponentialRampToValueAtTime(38, t + 0.16);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.55, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+      o.connect(g); g.connect(bossMusic.layers.drums);
+      o.start(t); o.stop(t + 0.2);
+    } catch (e) {}
+  }
+
+  function bossHatAt(t) {
+    noiseBurstTo(bossMusic.layers.drums, t, 0.025, 0.035, 8500);
+  }
+
+  function bossSnareAt(t) {
+    noiseBurstTo(bossMusic.layers.drums, t, 0.10, 0.11, 1400);
+    try {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(190, t);
+      o.frequency.exponentialRampToValueAtTime(90, t + 0.05);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.03, t + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+      o.connect(g); g.connect(bossMusic.layers.drums);
+      o.start(t); o.stop(t + 0.08);
+    } catch (e) {}
+  }
+
+  function bossBassAt(t, f) {
+    try {
+      var o = actx.createOscillator(), lp = actx.createBiquadFilter(), g = actx.createGain();
+      o.type = 'sawtooth';
+      o.frequency.setValueAtTime(f, t);
+      lp.type = 'lowpass'; lp.frequency.value = 380; lp.Q.value = 7;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.16, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+      o.connect(lp); lp.connect(g); g.connect(bossMusic.layers.bass);
+      o.start(t); o.stop(t + 0.15);
+    } catch (e) {}
+  }
+
+  function bossPadAt(t) {
+    try {
+      var g = actx.createGain(), lp = actx.createBiquadFilter();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.025, t + 0.35);
+      g.gain.setValueAtTime(0.025, t + 1.45);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 1.9);
+      lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.5;
+      lp.connect(g); g.connect(bossMusic.layers.pad);
+      var freqs = [110, 155.56];   // A2 + D#3 三全音
+      for (var i = 0; i < freqs.length; i++) {
+        var o = actx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(freqs[i], t);
+        o.detune.setValueAtTime(i === 0 ? -6 : 6, t);
+        o.connect(lp);
+        o.start(t); o.stop(t + 1.95);
+      }
+    } catch (e) {}
+  }
+
+  function bossSirenAt(t) {
+    try {
+      var o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(430, t);
+      o.frequency.linearRampToValueAtTime(650, t + 0.35);
+      o.frequency.linearRampToValueAtTime(430, t + 0.75);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.045, t + 0.06);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+      o.connect(g); g.connect(bossMusic.layers.siren);
+      o.start(t); o.stop(t + 0.95);
+    } catch (e) {}
+  }
+
+  function scheduleBossMusic() {
+    var ac = actx;
+    if (!ac || !bossMusic.on || !bossMusic.layers) return;
+    var stepDur = 60 / bossMusic.bpm / 4;
+    while (bossMusic.next < ac.currentTime + 0.15) {
+      var s = bossMusic.step % 16, t = bossMusic.next;
+      var bar = Math.floor(bossMusic.step / 16);
+      if (s % 4 === 0) bossKickAt(t);
+      if (bossMusic.intense && s === 14) bossKickAt(t);
+      if (s === 4 || s === 12) bossSnareAt(t);
+      if (s % 2 === 0) bossHatAt(t);
+      if (bossMusic.intense && s % 2 === 1) bossHatAt(t);
+      var b = BOSS_BASS[s];
+      if (b > 0) bossBassAt(t, b);
+      if (s === 0) {
+        bossPadAt(t);
+        if (bar % 2 === 0) bossSirenAt(t);
+      }
+      bossMusic.step++;
+      bossMusic.next += stepDur;
+    }
+  }
+
+  function startBossMusic() {
+    bossMusic.wanted = true;
+    // 不在无交互时创建 AudioContext：战斗音乐总是跟随已解锁的宿主音频
+    if (!actx || !master) return;
+    var ac = actx;
+    ensureBossNodes();
+    if (bossMusic.on) return;
+    bossMusic.on = true;
+    bossMusic.step = 0;
+    bossMusic.next = ac.currentTime + 0.08;
+    updateBossMusic();
+    var t = ac.currentTime;
+    bossMusic.gain.gain.cancelScheduledValues(t);
+    bossMusic.gain.gain.setValueAtTime(0.0001, t);
+    bossMusic.gain.gain.setTargetAtTime(0.40, t, 0.35);
+    if (music.gain) music.gain.gain.setTargetAtTime(0.0001, t, 0.3);
+    if (bossMusic.timer) clearInterval(bossMusic.timer);
+    bossMusic.timer = setInterval(scheduleBossMusic, 25);
+    scheduleBossMusic();
+  }
+
+  function stopBossMusic() {
+    bossMusic.wanted = false;
+    bossMusic.on = false;
+    if (bossMusic.timer) { clearInterval(bossMusic.timer); bossMusic.timer = null; }
+    if (!actx) return;
+    var t = actx.currentTime;
+    if (bossMusic.gain) bossMusic.gain.gain.setTargetAtTime(0.0001, t, 0.4);
+    if (music.on && music.gain) music.gain.gain.setTargetAtTime(0.38, t, 0.5);
+  }
+
+  function updateBossMusic() {
+    if (!S.boss) {
+      bossMusic.targets.siren = 0;
+      bossMusic.intense = false;
+      return;
+    }
+    var ratio = S.boss.maxHp > 0 ? S.boss.hp / S.boss.maxHp : 1;
+    bossMusic.targets.drums = 1;
+    bossMusic.targets.bass = 1;
+    bossMusic.targets.pad = 0.8;
+    bossMusic.targets.siren = ratio <= 0.55 ? 1 : 0;
+    bossMusic.intense = ratio <= 0.25;
+    if (!actx || !bossMusic.layers) return;
+    var now = actx.currentTime;
+    for (var k in bossMusic.layers) {
+      if (!bossMusic.layers.hasOwnProperty(k)) continue;
+      bossMusic.layers[k].gain.setTargetAtTime(bossMusic.targets[k], now, 0.4);
+    }
+  }
+
+  // ===== 机型 / 枪型 取值 =====
+  function ship() { return CFG.ships[S.ship]; }
+  function weapon() { return CFG.weapons[S.player ? S.player.weapon : 'pulse']; }
+
+  // ===== 火力曲线（Combo → 射速 / 弹丸 / 伤害；再乘机型与枪型系数）=====
+  function fireInterval() {
+    var w = weapon(), it;
+    if (w.constant) {
+      it = w.base;   // LANCE：恒定射速，不受 Combo 影响
+    } else {
+      var pulse = clamp(CFG.fire.base - S.combo * CFG.fire.perCombo, CFG.fire.min, CFG.fire.base);
+      it = pulse / CFG.fire.base * w.base;
+    }
+    it /= ship().fire;
+    if (S.upgrades) it *= S.upgrades.rate;
+    if (S.player && S.player.over > 0) it *= 0.65;
+    return it;
+  }
+  function pellets() {
+    var w = weapon();
+    var base = w.pellets ? w.pellets : (S.combo >= CFG.fire.pellets3 ? 3 : S.combo >= CFG.fire.pellets2 ? 2 : 1);
+    return base + (S.upgrades ? S.upgrades.shots : 0);
+  }
+  function damage() {
+    var d = (CFG.fire.dmgBase + Math.floor(S.combo / 10) * CFG.fire.dmgPer10) * weapon().dmg * ship().dmg;
+    if (S.upgrades) d *= S.upgrades.dmg;
+    d *= 1 + 0.08 * (meta ? meta.dmg : 0);
+    if (S.player && S.player.over > 0) d *= 1.3;
+    return d;
+  }
+  function comboWindow() { return CFG.combo.window * (S.upgrades ? S.upgrades.combo : 1); }
+
+  // Boss 血量按当前理论 DPS 拉一个目标 TTK，避免后期构筑成型后秒 Boss
+  function playerDpsEstimate() {
+    var shot = damage() / fireInterval() * pellets();
+    var wing = 0;
+    if (S.wingCount > 0) {
+      var wd = 1.2 + 0.9 * S.wingLevel;
+      var wi = Math.max(0.42, 0.95 - (S.wingLevel - 1) * 0.07);
+      wing = S.wingCount * wd / wi;
+    }
+    return shot + wing;
+  }
+  function spread() {
+    var w = weapon();
+    if (w.spread) return w.spread;
+    var p = pellets();
+    return p >= 3 ? CFG.fire.spread3 : p === 2 ? CFG.fire.spread2 : 0;
+  }
+
+  // ===== 生命周期 =====
+  function reset(shipId, mode) {
+    if (shipId && CFG.ships[shipId]) S.ship = shipId;
+    var sh = ship();
+    S.mode = mode || 'playing'; S.time = 0; S.elapsed = 0;
+    S.slow = 0;
+    S.score = 0; S.kills = 0; S.maxCombo = 0;
+    S.deathT = 0; S.deathReport = null;
+    S.introT = 0; S.selectT = 0;
+    S.combo = 0; S.comboTimer = 0; S.comboPop = 0;
+    S.trauma = 0; S.hitStop = 0; S.hurtFlash = 0;
+    S.shakeX = 0; S.shakeY = 0; S.shakeRot = 0; S.shakeTime = 0;
+    S.fireCooldown = 0; S.muzzle = 0; S.spawnTimer = 1.0;
+    S.rngState = 0x9e3779b9;
+    poolReleaseAll('bullets', S.bullets); poolReleaseAll('enemies', S.enemies);
+    poolReleaseAll('sparks', S.sparks); poolReleaseAll('chunks', S.chunks);
+    poolReleaseAll('rings', S.rings); poolReleaseAll('floats', S.floats);
+    poolReleaseAll('pickups', S.pickups); poolReleaseAll('ebullets', S.ebullets);
+    S.wave = 1; S.waveT = 0; S.wavePhase = 'normal'; S.warnTick = 0;
+    S.waveBanner = 0; S.waveBannerText = ''; S.boss = null;
+    S.victoryFlash = 0;
+    S.upgrade = null;
+    S.rewardT = 0; S.rewardDur = 0.3; S.rewardDrops = 0;
+    S.sysLog = null;
+    S.chainFx.length = 0;
+    menu.hover = -1;
+    menu.resetUntil = 0;
+    S.upgrades = {
+      shots: 0, rate: 1, dmg: 1, pierce: false,
+      speed: 1, hpBonus: 0, magnet: 1, combo: 1, bulletSpeed: 1,
+      lifesteal: 0, chain: 0,
+      picks: {}, family: { yellow: 0, pink: 0, green: 0, blue: 0 }
+    };
+    var metaHp = meta ? meta.hp : 0;
+    S.player = { x: W / 2, y: H / 2, r: sh.r, hp: sh.hp + metaHp, maxHp: sh.hp + metaHp,
+                 inv: 0, aim: -Math.PI / 2, weapon: 'pulse', shield: 0, over: 0 };
+    S.wingCount = Math.min(3, 1 + (meta ? meta.wing : 0));
+    S.wingLevel = 1;
+    S.wings = [];
+    for (var wi = 0; wi < S.wingCount; wi++) {
+      S.wings.push({ angle: wi * 2.1, cd: 0.5, flash: 0, x: W / 2 + 58, y: H / 2 });
+    }
+    S.shardsEarned = 0;
+    S.metaOpen = false; S.metaHover = -1;
+    input.firing = false;
+    story.text = ''; story.t = -1; story.phase = -1;
+    story.nextTrigger = 10; story.cooldown = 0; story.flicker = 0;
+    story.cursor[0] = 0; story.cursor[1] = 0; story.cursor[2] = 0;
+    // 重开时若死亡淡出还没结束，先干净地停掉，随后由 selectShip/R 重新淡入
+    if (music.on || music.fadeTimer || bossMusic.on || bossMusic.wanted) stopMusic();
+    updateMusicLayers();
+  }
+
+  function selectShip(id) {
+    if (!CFG.ships[id]) return;
+    reset(id, 'intro');
+    S.introT = 0;
+    sfx.deploy();
+    if (actx) startMusic();
+  }
+
+  // 部署过渡：1.4s 内画面从黑淡入、镜头从 1.08 拉回 1.0
+  function updateIntro(dt) {
+    S.introT += dt;
+    if (S.introT >= 1.4) S.mode = 'playing';
+  }
+
+  // 死亡后按 R：回到机型选择（不是直接开打）
+  function returnToSelect() {
+    reset(S.ship, 'select');
+    S.selectT = 0;
+    sfx.uiBack();
+  }
+
+  function spawnEnemy() {
+    if (S.enemies.length >= CFG.enemy.cap) return;
+    var side = Math.floor(rnd() * 4), m = 24, x, y;
+    if (side === 0) { x = rnd() * W; y = -m; }
+    else if (side === 1) { x = W + m; y = rnd() * H; }
+    else if (side === 2) { x = rnd() * W; y = H + m; }
+    else { x = -m; y = rnd() * H; }
+    var waveLv = Math.max(0, S.wave - 1);
+    var hp = Math.min(CFG.enemy.hpMax + 2,
+      1 + Math.floor(S.elapsed / CFG.enemy.hpPerSec) + Math.floor(waveLv / 2));
+    var e = poolTake('enemies', S.enemies);
+    e.x = x; e.y = y; e.r = CFG.enemy.r; e.hp = hp; e.maxHp = hp;
+    e.spd = (CFG.enemy.speedMin + Math.min(S.elapsed * CFG.enemy.speedRamp, CFG.enemy.speedMax - CFG.enemy.speedMin))
+      * (1 + waveLv * 0.05);
+    e.phase = rnd() * TAU; e.flash = 0;
+    e.__uid = ++enemyUidSeq; e.__idx = -1;
+  }
+
+  function sparkBurst(x, y, n, color) {
+    for (var i = 0; i < n; i++) {
+      var a = rnd() * TAU, sp = 120 + rnd() * 300;
+      var s = poolTake('sparks', S.sparks);
+      s.x = x; s.y = y; s.vx = Math.cos(a) * sp; s.vy = Math.sin(a) * sp;
+      s.life = CFG.fx.sparkLife; s.max = CFG.fx.sparkLife;
+      s.size = 2 + rnd() * 2; s.color = color;
+    }
+  }
+
+  function chunkBurst(x, y, n) {
+    for (var i = 0; i < n; i++) {
+      var a = rnd() * TAU, sp = 60 + rnd() * 200;
+      var c = poolTake('chunks', S.chunks);
+      c.x = x; c.y = y; c.vx = Math.cos(a) * sp; c.vy = Math.sin(a) * sp;
+      c.rot = rnd() * TAU; c.vr = (rnd() - 0.5) * 12;
+      c.life = CFG.fx.chunkLife; c.max = CFG.fx.chunkLife;
+      c.size = 4 + rnd() * 3; c.color = COL.chunk;
+    }
+  }
+
+  function killEnemy(e, award) {
+    award = award !== false;
+    sparkBurst(e.x, e.y, CFG.fx.killSparks, COL.spark);
+    chunkBurst(e.x, e.y, CFG.fx.killChunks);
+    var rg = poolTake('rings', S.rings);
+    rg.x = e.x; rg.y = e.y; rg.r = 6; rg.r1 = 46;
+    rg.life = CFG.fx.ringLife; rg.max = CFG.fx.ringLife; rg.color = COL.ring;
+    if (!award) { sparkBurst(e.x, e.y, 6, COL.chunk); return; }
+    S.trauma = Math.min(1, S.trauma + CFG.shake.kill);
+    S.combo += 1;
+    if (S.combo > S.maxCombo) S.maxCombo = S.combo;
+    S.comboTimer = comboWindow();
+    S.comboPop = 1;
+    S.kills += 1;
+    S.score += CFG.score.kill + Math.min(S.combo, 50) * CFG.score.perCombo;
+    if (S.combo % CFG.shake.milestoneEvery === 0) {
+      S.trauma = Math.min(1, S.trauma + CFG.shake.milestone);
+      var fl = poolTake('floats', S.floats);
+      fl.x = S.player.x; fl.y = S.player.y - 46; fl.text = 'COMBO \u00d7' + S.combo;
+      fl.life = 0.9; fl.max = 0.9; fl.vy = -42; fl.size = 22; fl.color = '#ffe27a';
+      var rg2 = poolTake('rings', S.rings);
+      rg2.x = S.player.x; rg2.y = S.player.y; rg2.r = 10; rg2.r1 = 110;
+      rg2.life = 0.5; rg2.max = 0.5; rg2.color = '#ffe27a';
+      sfx.milestone();
+    }
+    if (S.kills % CFG.pickup.pityEvery === 0 || rnd() < CFG.pickup.chance) {
+      spawnPickup(null, e.x, e.y);
+    }
+    if (S.upgrades && S.upgrades.lifesteal > 0 && S.player.hp < S.player.maxHp &&
+        rnd() < 0.10 * S.upgrades.lifesteal) {
+      S.player.hp += 1;
+      var flHeal = poolTake('floats', S.floats);
+      flHeal.x = S.player.x; flHeal.y = S.player.y - 44;
+      flHeal.text = '+1'; flHeal.life = 0.8; flHeal.max = 0.8;
+      flHeal.vy = -36; flHeal.size = 14; flHeal.color = '#6dffb0';
+    }
+    sfx.kill();
+  }
+
+  function tryChain(source) {
+    if (!S.upgrades || !S.upgrades.chain) return;
+    if (rnd() > 0.14 * S.upgrades.chain) return;
+    var best = null, bd = 130 * 130, es = S.enemies;
+    for (var i = 0; i < es.length; i++) {
+      var e = es[i];
+      if (e === source || e.hp <= 0) continue;
+      var dx = e.x - source.x, dy = e.y - source.y, d2 = dx * dx + dy * dy;
+      if (d2 < bd) { bd = d2; best = e; }
+    }
+    if (!best) return;
+    best.hp -= 1.5 * S.upgrades.chain;
+    best.flash = 0.09;
+    sparkBurst(best.x, best.y, 6, '#7fe8ff');
+    S.chainFx.push({
+      x1: source.x, y1: source.y, x2: best.x, y2: best.y,
+      life: 0.12, max: 0.12, color: '#7fe8ff'
+    });
+    if (S.chainFx.length > 12) S.chainFx.shift();
+    sfx.chain();
+    if (best.hp <= 0) killEnemy(best);
+  }
+
+  function hurtPlayer(e) {
+    var p = S.player;
+    if (p.inv > 0 || p.shield > 0 || S.mode !== 'playing') return;
+    var lostCombo = S.combo;
+    p.hp -= 1;
+    p.inv = CFG.player.iframes;
+    S.hitStop = CFG.hitstop.hurt;          // 90ms 顿帧
+    S.trauma = Math.min(1, S.trauma + CFG.shake.hurt);
+    S.combo = 0; S.comboTimer = 0; S.comboPop = 0;   // 断连击
+    S.hurtFlash = CFG.fx.hurtFlash;
+    var penalty = Math.min(S.score, CFG.score.hurt); // 扣分惩罚
+    S.score -= penalty;
+    var dx = p.x - e.x, dy = p.y - e.y, d = Math.hypot(dx, dy) || 1;
+    p.x = clamp(p.x + dx / d * CFG.player.hitKnockback, p.r, W - p.r);
+    p.y = clamp(p.y + dy / d * CFG.player.hitKnockback, p.r, H - p.r);
+    sparkBurst(p.x, p.y, 10, '#ff6b8a');
+    var hrg = poolTake('rings', S.rings);
+    hrg.x = p.x; hrg.y = p.y; hrg.r = 8; hrg.r1 = 70;
+    hrg.life = 0.4; hrg.max = 0.4; hrg.color = '#ff5c86';
+    var hfl = poolTake('floats', S.floats);
+    hfl.x = p.x; hfl.y = p.y - 34; hfl.text = '-1 HP';
+    hfl.life = 0.8; hfl.max = 0.8; hfl.vy = -54; hfl.size = 18; hfl.color = '#ff6b8a';
+    if (penalty > 0) {
+      var hfl2 = poolTake('floats', S.floats);
+      hfl2.x = p.x; hfl2.y = p.y - 12; hfl2.text = '-' + penalty + ' 分';
+      hfl2.life = 0.8; hfl2.max = 0.8; hfl2.vy = -44; hfl2.size = 15; hfl2.color = '#ff9a6b';
+    }
+    if (lostCombo >= 5) {
+      var hfl3 = poolTake('floats', S.floats);
+      hfl3.x = p.x; hfl3.y = p.y - 58; hfl3.text = 'COMBO LOST';
+      hfl3.life = 0.9; hfl3.max = 0.9; hfl3.vy = -40; hfl3.size = 14; hfl3.color = '#ffcf6b';
+      sfx.comboLost();
+    }
+    if (p.hp <= 0) {
+      p.hp = 0;
+      S.mode = 'dead';
+      S.deathT = 0;
+      S.deathReport = buildDeathReport();
+      S.trauma = 1;
+      submitBest(S.score);
+      fadeOutMusic(2.2);   // 音乐低通下沉 2.2s 后停
+      sfx.powerDown();
+    } else {
+      sfx.hurt();
+    }
+  }
+
+  function shoot() {
+    var p = S.player, w = weapon(), n = pellets(), sp = spread(), baseA = p.aim;
+    var speed = w.speed * (p.over > 0 ? 1.12 : 1) * (S.upgrades ? S.upgrades.bulletSpeed : 1);
+    for (var i = 0; i < n; i++) {
+      var off = n === 1 ? 0 : (i - (n - 1) / 2) * sp;
+      var a = baseA + off;
+      var b = poolTake('bullets', S.bullets);
+      b.x = p.x + Math.cos(baseA) * (p.r + 5);
+      b.y = p.y + Math.sin(baseA) * (p.r + 5);
+      b.vx = Math.cos(a) * speed;
+      b.vy = Math.sin(a) * speed;
+      b.life = w.life;
+      b.dmg = damage();
+      b.r = w.pierce ? 2 : 3;
+      b.pierce = !!w.pierce || !!(S.upgrades && S.upgrades.pierce);
+      b.bossHit = false;
+      if (b.hits) b.hits.length = 0; else b.hits = [];
+      b.color = w.color;
+    }
+    S.fireCooldown = fireInterval();
+    S.muzzle = CFG.fx.muzzle;
+    sfx.shoot();
+  }
+
+  // ===== 掉落物：权重抽取 / 生成 / 拾取 =====
+  function pickWeighted() {
+    var total = 0, i;
+    for (i = 0; i < CFG.pickupTable.length; i++) total += CFG.pickupTable[i].weight;
+    var r = rnd() * total;
+    for (i = 0; i < CFG.pickupTable.length; i++) {
+      r -= CFG.pickupTable[i].weight;
+      if (r <= 0) return CFG.pickupTable[i].type;
+    }
+    return 'heal';
+  }
+
+  function spawnPickup(type, x, y) {
+    if (S.pickups.length >= CFG.pickup.cap) return null;
+    var t = type || pickWeighted();
+    var pk = poolTake('pickups', S.pickups);
+    pk.type = t; pk.x = clamp(x, 26, W - 26); pk.y = clamp(y, 26, H - 26);
+    pk.life = CFG.pickup.life; pk.max = CFG.pickup.life; pk.bob = rnd() * TAU;
+    return pk;
+  }
+
+  function collectPickup(pk) {
+    var p = S.player, info = CFG.pickupInfo[pk.type];
+    var label = info.name;
+    if (pk.type === 'heal') {
+      if (p.hp < p.maxHp) { p.hp += 1; label = '+1 HP'; }
+      else { S.score += 20; label = '+20 分'; }
+    } else if (pk.type === 'shield') {
+      p.shield = Math.max(p.shield, 3.5);
+      label = '护盾 3.5s';
+    } else if (pk.type === 'over') {
+      p.over = Math.max(p.over, 8);
+      label = '超载 8s';
+    } else if (pk.type === 'slow') {
+      S.slow = Math.max(S.slow, 4.5);
+      label = '时缓 4.5s';
+    } else if (pk.type === 'w_spread') {
+      p.weapon = 'spread';
+      label = 'SCATTER';
+    } else if (pk.type === 'w_laser') {
+      p.weapon = 'laser';
+      label = 'LANCE';
+    } else if (pk.type === 'coin') {
+      S.score += 40;
+      label = '+40 分';
+    }
+    var cfl = poolTake('floats', S.floats);
+    cfl.x = p.x; cfl.y = p.y - 44; cfl.text = label;
+    cfl.life = 1.0; cfl.max = 1.0; cfl.vy = -46; cfl.size = 16; cfl.color = info.color;
+    var crg = poolTake('rings', S.rings);
+    crg.x = pk.x; crg.y = pk.y; crg.r = 6; crg.r1 = 60;
+    crg.life = 0.4; crg.max = 0.4; crg.color = info.color;
+    S.trauma = Math.min(1, S.trauma + 0.10);
+    sfx.pickup();
+  }
+
+  // ===== Boss 战利品：暂停三选一强化 =====
+  function upgradePicks(id) { return S.upgrades.picks[id] || 0; }
+  function upgradeDesc(d, n) { return typeof d.desc === 'function' ? d.desc(n) : d.desc; }
+
+  function shuffleUpgrades(a) {
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(rnd() * (i + 1));
+      var t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    return a;
+  }
+
+  function rollUpgrades() {
+    var pool = [], i, d;
+    for (i = 0; i < UPGRADE_DEFS.length; i++) {
+      d = UPGRADE_DEFS[i];
+      if (upgradePicks(d.id) >= d.max) continue;
+      if (d.unique && d.owned && d.owned()) continue;
+      if (d.id === 'wing' && S.wingCount >= 3) continue;
+      pool.push(d);
+    }
+    // 只在常规强化不足 3 张时才启用兜底，避免稀释正常构筑
+    if (pool.length < 3) {
+      for (i = 0; i < FALLBACK_UPGRADES.length; i++) {
+        if (pool.indexOf(FALLBACK_UPGRADES[i]) < 0) pool.push(FALLBACK_UPGRADES[i]);
+      }
+    }
+    if (!pool.length) return [];
+
+    // 流派聚焦：某色系累计 ≥2 次后，三选一里至少 2 张来自该流派
+    var dominant = null, best = 0, fam;
+    for (fam in S.upgrades.family) {
+      if (!S.upgrades.family.hasOwnProperty(fam)) continue;
+      var c = S.upgrades.family[fam];
+      if (c >= 2 && c > best) { best = c; dominant = fam; }
+    }
+    var chosen = [];
+    if (dominant) {
+      var famPool = [];
+      for (i = 0; i < pool.length; i++) if (pool[i].family === dominant) famPool.push(pool[i]);
+      shuffleUpgrades(famPool);
+      for (i = 0; i < 2 && i < famPool.length; i++) chosen.push(famPool[i]);
+    }
+    var rest = [];
+    for (i = 0; i < pool.length; i++) if (chosen.indexOf(pool[i]) < 0) rest.push(pool[i]);
+    shuffleUpgrades(rest);
+    while (chosen.length < 3 && rest.length) chosen.push(rest.shift());
+
+    var out = [];
+    for (i = 0; i < chosen.length; i++) {
+      d = chosen[i];
+      var n = upgradePicks(d.id);
+      out.push({
+        id: d.id, name: d.name, desc: upgradeDesc(d, n),
+        family: d.family, familyName: FAMILY[d.family].name,
+        color: FAMILY[d.family].color, tier: n + 1, max: d.max
+      });
+    }
+    return out;
+  }
+
+  function findUpgrade(id) {
+    for (var i = 0; i < ALL_UPGRADES.length; i++) if (ALL_UPGRADES[i].id === id) return ALL_UPGRADES[i];
+    return null;
+  }
+
+  function setSysLog(text) {
+    S.sysLog = { text: text, t: 0, dur: 1.6 };
+  }
+
+  function applyUpgrade(id) {
+    var d = findUpgrade(id);
+    if (!d) return null;
+    var n = upgradePicks(id);
+    if (n >= d.max) return null;
+    if (d.unique && d.owned && d.owned()) return null;
+    d.apply(n);
+    S.upgrades.picks[id] = n + 1;
+    S.upgrades.family[d.family] = (S.upgrades.family[d.family] || 0) + 1;
+    if (id === 'damage') setSysLog('[警告：大范围杀伤性武器已解锁]');
+    else if (id === 'rate') setSysLog('[系统超频：注意机体过热风险]');
+    return d;
+  }
+
+  // 击杀 Boss 后先进入约 0.3s 的子弹时间，再缓缓拉出三选一
+  function startReward(dropCount) {
+    S.mode = 'reward';
+    S.rewardT = 0;
+    S.rewardDrops = dropCount || 0;
+    input.firing = false;
+  }
+
+  function updateReward(dt) {
+    S.rewardT += dt;
+    if (S.victoryFlash > 0) S.victoryFlash = Math.max(0, S.victoryFlash - dt);
+    updateShake(dt, 0.6);
+    stepParticles(dt * 0.45);     // 慢动作：粒子只走 45% 时间
+    if (S.rewardT >= S.rewardDur) {
+      openUpgrade(S.rewardDrops);
+    }
+  }
+
+  function openUpgrade(lootCount) {
+    S.mode = 'upgrade';
+    input.firing = false;
+    S.upgrade = { t: 0, options: rollUpgrades(), hover: -1, dropCount: lootCount || 0 };
+    duckMusic(true);
+    sfx.upgradeOpen();
+  }
+
+  function chooseUpgrade(i) {
+    var u = S.upgrade;
+    if (!u) return;
+    var opt = u.options[i];
+    if (!opt) return;
+    applyUpgrade(opt.id);
+    S.upgrade = null;
+    S.mode = 'playing';
+    S.fireCooldown = 0;
+    input.firing = false;
+    // 立即刷新连击窗口并在玩家周围生成一圈敌人，避免 Boss 后空窗断 Combo
+    S.comboTimer = comboWindow();
+    S.spawnTimer = 0.45;
+    spawnSurge(8);
+    S.waveBanner = 2.2;
+    S.waveBannerText = 'WAVE ' + S.wave + ' · 强化完成';
+    duckMusic(false);
+    sfx.upgradePick();
+  }
+
+  function spawnSurge(n) {
+    var p = S.player;
+    if (!p) return;
+    for (var i = 0; i < n; i++) {
+      if (S.enemies.length >= CFG.enemy.cap) break;
+      spawnEnemy();
+      var e = S.enemies[S.enemies.length - 1];
+      var a = (i / n) * TAU + rnd() * 0.35;
+      var r = 240 + rnd() * 80;
+      e.x = clamp(p.x + Math.cos(a) * r, 30, W - 30);
+      e.y = clamp(p.y + Math.sin(a) * r, 60, H - 30);
+      e.phase = rnd() * TAU;
+    }
+  }
+
+  // 僚机：环绕玩家、自动索敌；数量靠强化，等级靠击杀 Boss
+  function updateWings(dt) {
+    var p = S.player;
+    if (!p) return;
+    for (var i = 0; i < S.wings.length; i++) {
+      var wg = S.wings[i];
+      wg.angle += dt * 1.6;
+      var baseA = wg.angle + i * (TAU / Math.max(1, S.wings.length));
+      wg.x = p.x + Math.cos(baseA) * 58;
+      wg.y = p.y + Math.sin(baseA) * 58;
+      if (wg.flash > 0) wg.flash = Math.max(0, wg.flash - dt);
+      wg.cd -= dt;
+      if (wg.cd > 0) continue;
+      var target = null, best = 460 * 460;
+      if (S.boss && S.boss.state === 'active') {
+        var bdx = S.boss.x - wg.x, bdy = S.boss.y - wg.y, bd = bdx * bdx + bdy * bdy;
+        if (bd < best) { best = bd; target = S.boss; }
+      }
+      for (var j = 0; j < S.enemies.length; j++) {
+        var e = S.enemies[j];
+        if (e.hp <= 0) continue;
+        var dx = e.x - wg.x, dy = e.y - wg.y, d2 = dx * dx + dy * dy;
+        if (d2 < best) { best = d2; target = e; }
+      }
+      if (!target) { wg.cd = 0.12; continue; }
+      var ang = Math.atan2(target.y - wg.y, target.x - wg.x);
+      var b = poolTake('bullets', S.bullets);
+      b.x = wg.x; b.y = wg.y;
+      b.vx = Math.cos(ang) * 720; b.vy = Math.sin(ang) * 720;
+      b.life = 2.4; b.dmg = 1.2 + 0.9 * S.wingLevel; b.r = 2.5;
+      b.pierce = !!(S.upgrades && S.upgrades.pierce);
+      b.bossHit = false;
+      if (b.hits) b.hits.length = 0; else b.hits = [];
+      b.color = '#7fe8ff'; b.wing = true;
+      wg.cd = Math.max(0.42, 0.95 - (S.wingLevel - 1) * 0.07);
+      wg.flash = 0.12;
+    }
+  }
+
+  function upgradeCardRect(i) {
+    var cw = 250, ch = 300, gap = 28;
+    var total = cw * 3 + gap * 2;
+    var x0 = (W - total) / 2;
+    return { x: x0 + i * (cw + gap), y: 176, w: cw, h: ch };
+  }
+
+  function upgradeHit(mx, my) {
+    if (!S.upgrade) return -1;
+    for (var i = 0; i < S.upgrade.options.length; i++) {
+      var r = upgradeCardRect(i);
+      if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) return i;
+    }
+    return -1;
+  }
+
+  function stepParticles(dt) {
+    var i;
+    for (i = S.sparks.length - 1; i >= 0; i--) {
+      var sp = S.sparks[i];
+      sp.x += sp.vx * dt; sp.y += sp.vy * dt;
+      sp.vx *= (1 - 5 * dt); sp.vy *= (1 - 5 * dt);
+      sp.life -= dt;
+      if (sp.life <= 0) poolGive('sparks', S.sparks, i);
+    }
+    for (i = S.chunks.length - 1; i >= 0; i--) {
+      var ch = S.chunks[i];
+      ch.x += ch.vx * dt; ch.y += ch.vy * dt;
+      ch.vx *= (1 - 4 * dt); ch.vy *= (1 - 4 * dt);
+      ch.rot += ch.vr * dt;
+      ch.life -= dt;
+      if (ch.life <= 0) poolGive('chunks', S.chunks, i);
+    }
+    for (i = S.rings.length - 1; i >= 0; i--) {
+      S.rings[i].life -= dt;
+      if (S.rings[i].life <= 0) poolGive('rings', S.rings, i);
+    }
+    for (i = S.floats.length - 1; i >= 0; i--) {
+      S.floats[i].y += S.floats[i].vy * dt;
+      S.floats[i].life -= dt;
+      if (S.floats[i].life <= 0) poolGive('floats', S.floats, i);
+    }
+    for (i = S.chainFx.length - 1; i >= 0; i--) {
+      S.chainFx[i].life -= dt;
+      if (S.chainFx[i].life <= 0) S.chainFx.splice(i, 1);
+    }
+  }
+
+  // 暂停期间只推进爆炸/震屏/闪光，不推进游戏世界
+  function updateUpgrade(dt) {
+    if (S.upgrade) S.upgrade.t += dt;
+    if (S.victoryFlash > 0) S.victoryFlash = Math.max(0, S.victoryFlash - dt);
+    updateShake(dt);
+    stepParticles(dt);
+  }
+
+  function drawUpgradeGlyph(id, x, y, color) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 12;
+    if (id === 'double') {
+      ctx.fillRect(-12, -14, 7, 28);
+      ctx.fillRect(5, -14, 7, 28);
+    } else if (id === 'rate') {
+      for (var i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-14 + i * 10, -12);
+        ctx.lineTo(-4 + i * 10, 0);
+        ctx.lineTo(-14 + i * 10, 12);
+        ctx.stroke();
+      }
+    } else if (id === 'damage') {
+      ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(14, 12); ctx.lineTo(-14, 12); ctx.closePath(); ctx.fill();
+    } else if (id === 'pierce') {
+      ctx.beginPath(); ctx.arc(0, 0, 10, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-18, 0); ctx.lineTo(18, 0); ctx.stroke();
+    } else if (id === 'speed') {
+      ctx.beginPath(); ctx.moveTo(-14, -10); ctx.lineTo(14, 0); ctx.lineTo(-14, 10); ctx.closePath(); ctx.fill();
+    } else if (id === 'hp') {
+      ctx.fillRect(-4, -16, 8, 32);
+      ctx.fillRect(-16, -4, 32, 8);
+    } else if (id === 'magnet') {
+      ctx.beginPath(); ctx.arc(0, 0, 13, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, 6, 0, TAU); ctx.stroke();
+    } else if (id === 'combo') {
+      ctx.beginPath(); ctx.arc(-8, 0, 7, 0, TAU); ctx.stroke();
+      ctx.beginPath(); ctx.arc(8, 0, 7, 0, TAU); ctx.stroke();
+    } else if (id === 'wing') {
+      ctx.beginPath(); ctx.moveTo(-12, -8); ctx.lineTo(-4, 0); ctx.lineTo(-12, 8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(2, -10); ctx.lineTo(10, 0); ctx.lineTo(2, 10); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.arc(0, 0, 12, 0, TAU); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawUpgrade() {
+    var u = S.upgrade;
+    if (!u) return;
+    var a = clamp(u.t / 0.4, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = 0.84 * a;
+    ctx.fillStyle = '#03040a';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = a * 0.95;
+    ctx.shadowColor = '#5ee8ff';
+    ctx.shadowBlur = 22;
+    ctx.fillStyle = '#eaf6ff';
+    ctx.font = '800 32px ' + FONT;
+    ctx.fillText('SYSTEM UPGRADE', W / 2, 104);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = a * 0.55;
+    ctx.fillStyle = '#9fb8d8';
+    ctx.font = '500 13px ' + FONT;
+    ctx.fillText('选择一项强化 · WAVE ' + S.wave + ' · 游戏已暂停', W / 2, 136);
+    if (u.dropCount > 0) {
+      // 主观、模糊的感知措辞；随叙事阶段变化，避免"系统投放"口吻
+      var signalText = story.phase >= 2
+        ? '残骸中仍有 ' + u.dropCount + ' 个信号'
+        : story.phase === 1
+          ? '探测到 ' + u.dropCount + ' 个未登记信号'
+          : '探测到 ' + u.dropCount + ' 个可回收信号';
+      ctx.globalAlpha = a * 0.72;
+      ctx.fillStyle = '#ffd45e';
+      ctx.font = '500 12px ' + FONT;
+      ctx.fillText(signalText, W / 2, 158);
+    }
+    ctx.restore();
+
+    for (var i = 0; i < u.options.length; i++) {
+      var opt = u.options[i], r = upgradeCardRect(i);
+      var hover = u.hover === i;
+      var ca = clamp((u.t - i * 0.08) / 0.3, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = ca;
+      ctx.translate(0, (1 - ca) * 24);
+      ctx.fillStyle = hover ? 'rgba(24, 40, 70, 0.95)' : 'rgba(12, 18, 34, 0.92)';
+      ctx.strokeStyle = opt.color;
+      ctx.lineWidth = hover ? 2.5 : 1.5;
+      ctx.shadowColor = opt.color;
+      ctx.shadowBlur = hover ? 22 : 8;
+      ctx.beginPath();
+      ctx.rect(r.x, r.y, r.w, r.h);
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      ctx.fillStyle = 'rgba(150, 190, 255, 0.55)';
+      ctx.font = '600 12px ' + FONT;
+      ctx.textAlign = 'left';
+      ctx.fillText('[' + (i + 1) + ']', r.x + 16, r.y + 20);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = opt.color;
+      ctx.globalAlpha = ca * 0.85;
+      ctx.font = '600 11px ' + FONT;
+      ctx.fillText(opt.familyName, r.x + r.w - 16, r.y + 20);
+
+      drawUpgradeGlyph(opt.id, r.x + r.w / 2, r.y + 84, opt.color);
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(200, 220, 255, 0.55)';
+      ctx.font = '500 11px ' + FONT;
+      ctx.fillText('品质 ' + QUALITY[Math.min(QUALITY.length - 1, opt.tier - 1)], r.x + r.w / 2, r.y + 126);
+      ctx.fillStyle = opt.color;
+      ctx.font = '800 21px ' + FONT;
+      ctx.fillText(opt.name, r.x + r.w / 2, r.y + 156);
+      ctx.fillStyle = '#cfe0f5';
+      ctx.font = '400 13px ' + FONT;
+      ctx.fillText(opt.desc, r.x + r.w / 2, r.y + 190);
+      ctx.fillStyle = 'rgba(150, 180, 230, 0.45)';
+      ctx.font = '500 11px ' + FONT;
+      ctx.fillText(hover ? '点击选择' : '强化模块', r.x + r.w / 2, r.y + r.h - 26);
+      ctx.restore();
+    }
+
+    var build = [];
+    if (S.upgrades.shots > 0) build.push('双发×' + S.upgrades.shots);
+    if (S.upgrades.rate < 1) build.push('射速×' + (1 / S.upgrades.rate).toFixed(2));
+    if (S.upgrades.dmg > 1) build.push('伤害×' + S.upgrades.dmg.toFixed(2));
+    if (S.upgrades.pierce) build.push('穿透');
+    if (S.upgrades.speed > 1) build.push('移速×' + S.upgrades.speed.toFixed(2));
+    if (S.upgrades.hpBonus > 0) build.push('HP+' + S.upgrades.hpBonus);
+    if (S.upgrades.magnet > 1) build.push('磁吸×' + S.upgrades.magnet.toFixed(1));
+    if (S.upgrades.combo > 1) build.push('连击×' + S.upgrades.combo.toFixed(1));
+    if (S.upgrades.bulletSpeed > 1) build.push('弹速×' + S.upgrades.bulletSpeed.toFixed(2));
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = a * 0.5;
+    ctx.fillStyle = '#9fb8d8';
+    ctx.font = '500 12px ' + FONT;
+    ctx.fillText('已装配：' + (build.length ? build.join(' · ') : '无'), W / 2, 524);
+    var famText = [];
+    for (var f in S.upgrades.family) {
+      if (!S.upgrades.family.hasOwnProperty(f)) continue;
+      if (S.upgrades.family[f] > 0) famText.push(FAMILY[f].name + ' ' + S.upgrades.family[f]);
+    }
+    ctx.globalAlpha = a * 0.42;
+    ctx.fillStyle = '#8fa8c8';
+    ctx.font = '500 11px ' + FONT;
+    ctx.fillText('流派：' + (famText.length ? famText.join(' · ') : '未定'), W / 2, 544);
+    ctx.restore();
+  }
+
+  // ===== 波次 + Boss：60s 一波，50s 警告，60s 小怪聚合出 Boss =====
+  function updateWave(dt) {
+    if (S.wavePhase === 'boss') { updateBoss(dt); return; }
+    S.waveT += dt;
+    if (S.wavePhase === 'normal' && S.waveT >= CFG.wave.warnAt) {
+      S.wavePhase = 'warning';
+      S.warnTick = 0;
+      sfx.warn();
+    }
+    if (S.wavePhase === 'warning') {
+      S.warnTick -= dt;
+      if (S.warnTick <= 0) { S.warnTick = 2; sfx.warn(); }
+    }
+    if (S.waveT >= CFG.wave.interval) spawnBoss();
+  }
+
+  function spawnBoss() {
+    S.wavePhase = 'boss';
+    var floorHp = CFG.wave.bossBaseHp + CFG.wave.bossHpPerWave * (S.wave - 1);
+    var hp = Math.max(floorHp, Math.round(playerDpsEstimate() * CFG.wave.bossTtk));
+    S.boss = {
+      x: W / 2, y: H / 2, r: CFG.wave.bossRadius,
+      hp: hp, maxHp: hp, t: 0, formT: 0, state: 'forming', rise: 0,
+      flash: 0, attackT: 0, ringAngle: 0, phase55: false, phase25: false
+    };
+    S.trauma = Math.min(1, S.trauma + 0.6);
+    sfx.bossSpawn();
+    startBossMusic();
+    updateBossMusic();
+  }
+
+  function updateBoss(dt) {
+    var b = S.boss;
+    if (!b) return;
+    b.t += dt;
+    updateBossMusic();
+    if (b.state === 'forming') {
+      b.formT += dt;
+      b.y = H / 2;
+      // 小怪只做动画层面的聚合：被吸向屏幕中央的 Boss，不参与碰撞
+      var es = S.enemies, ease = Math.min(1, dt * 8), i;
+      for (i = 0; i < es.length; i++) {
+        es[i].x += (b.x - es[i].x) * ease;
+        es[i].y += (b.y - es[i].y) * ease;
+      }
+      if (b.formT >= CFG.wave.bossForm) {
+        for (i = 0; i < es.length; i++) poolRecycle('enemies', es[i]);
+        es.length = 0;
+        b.state = 'active';
+        b.rise = 0;
+        sparkBurst(b.x, b.y, 30, '#ff3f8e');
+        S.trauma = Math.min(1, S.trauma + 0.3);
+      }
+      return;
+    }
+    if (b.flash > 0) b.flash = Math.max(0, b.flash - dt);
+    b.rise = Math.min(1, (b.rise || 0) + dt * 1.8);
+    b.x = W / 2 + Math.sin(b.t * 0.55) * 200 * b.rise;
+    b.y = H / 2 + (CFG.wave.bossY - H / 2) * b.rise + Math.sin(b.t * 0.9) * 14 * b.rise;
+    b.attackT += dt;
+    // 升空到位后才开火，避免弹幕在屏幕中央贴脸生成
+    if (b.rise > 0.85 && b.attackT >= CFG.wave.ringEvery) {
+      b.attackT = 0;
+      fireBossRing();
+      sfx.bossFire();
+    }
+    var p = S.player;
+    var dx = p.x - b.x, dy = p.y - b.y, rr = b.r * 0.82 + p.r;
+    // 成形后先升空，升到一定程度才允许碰撞，避免在屏幕中央"贴脸生成"
+    if (b.rise > 0.35 && dx * dx + dy * dy <= rr * rr && p.inv <= 0 && p.shield <= 0) hurtPlayer(b);
+  }
+
+  function fireBossRing() {
+    var b = S.boss;
+    if (!b) return;
+    var n = Math.min(32, CFG.wave.ringBase + (S.wave - 1) * 2);
+    for (var i = 0; i < n; i++) {
+      var a = b.ringAngle + i * TAU / n;
+      var eb = poolTake('ebullets', S.ebullets);
+      eb.x = b.x; eb.y = b.y;
+      eb.vx = Math.cos(a) * CFG.wave.ringSpeed;
+      eb.vy = Math.sin(a) * CFG.wave.ringSpeed;
+      eb.life = CFG.wave.ringLife;
+      eb.r = CFG.wave.bulletR;
+      eb.color = '#ff6fae';
+    }
+    b.ringAngle += 0.22;
+  }
+
+  function damageBoss(dmg, hx, hy) {
+    var b = S.boss;
+    if (!b || b.state !== 'active') return;
+    b.hp -= dmg;
+    b.flash = 0.09;
+    sparkBurst(hx, hy, 4, '#ffd45e');
+    S.trauma = Math.min(1, S.trauma + 0.02);
+    var ratio = b.maxHp > 0 ? b.hp / b.maxHp : 0;
+    if (ratio <= 0.55 && !b.phase55) {
+      b.phase55 = true;
+      sfx.bossPhase();
+      S.trauma = Math.min(1, S.trauma + 0.25);
+    }
+    if (ratio <= 0.25 && !b.phase25) {
+      b.phase25 = true;
+      sfx.bossPhase();
+      S.trauma = Math.min(1, S.trauma + 0.35);
+    }
+    if (S.time - (bossMusic.lastHitSfx || -1) > 0.08) {
+      bossMusic.lastHitSfx = S.time;
+      sfx.bossHit();
+    }
+    updateBossMusic();
+    if (b.hp <= 0) killBoss();
+  }
+
+  function killBoss() {
+    var b = S.boss;
+    if (!b) return;
+    S.score += 400 * S.wave;
+    S.kills += 1;
+    if (S.combo > S.maxCombo) S.maxCombo = S.combo;
+    // Boss 残骸：每击杀 1 只 Boss 获得 1 枚数据碎片，立即持久化
+    meta.shards += 1;
+    S.shardsEarned = (S.shardsEarned || 0) + 1;
+    saveMeta();
+    var flShard = poolTake('floats', S.floats);
+    flShard.x = b.x; flShard.y = b.y - 70;
+    flShard.text = '+1 碎片'; flShard.life = 1.0; flShard.max = 1.0;
+    flShard.vy = -32; flShard.size = 15; flShard.color = '#ffd45e';
+    // 每次击杀 Boss，全体僚机升级（数量靠强化，等级靠 Boss）
+    if (S.wingCount > 0 && S.wingLevel < 6) {
+      S.wingLevel += 1;
+      var flWing = poolTake('floats', S.floats);
+      flWing.x = S.player.x; flWing.y = S.player.y - 64;
+      flWing.text = 'WING Lv.' + S.wingLevel; flWing.life = 1.0; flWing.max = 1.0;
+      flWing.vy = -30; flWing.size = 16; flWing.color = '#7fe8ff';
+      sfx.wingLevel();
+    }
+    // 极其夸张的爆炸：多层火花 + 碎片 + 三重扩散环 + 全屏闪光
+    sparkBurst(b.x, b.y, 120, '#ffd45e');
+    sparkBurst(b.x, b.y, 40, '#ff6fae');
+    chunkBurst(b.x, b.y, 40);
+    for (var ri = 0; ri < 3; ri++) {
+      var rg = poolTake('rings', S.rings);
+      rg.x = b.x; rg.y = b.y;
+      rg.r = 20 + ri * 12; rg.r1 = 200 + ri * 80;
+      rg.life = 0.6 + ri * 0.15; rg.max = rg.life;
+      rg.color = ri === 1 ? '#ffd45e' : '#ff6fae';
+    }
+    S.trauma = 1;
+    S.hitStop = 0.14;
+    S.victoryFlash = 0.35;
+    // Boss 也掉落普通道具：保底修复 + 2 件随机，避免选完强化后血量/增益断档
+    spawnPickup('heal', b.x - 74, b.y + 24);
+    spawnPickup(null, b.x + 74, b.y + 24);
+    spawnPickup(null, b.x, b.y + 96);
+    poolReleaseAll('ebullets', S.ebullets);
+    S.boss = null;
+    S.wave += 1;
+    S.waveT = 0;
+    S.wavePhase = 'normal';
+    S.spawnTimer = 0.4;
+    S.waveBanner = 0;
+    S.waveBannerText = '';
+    stopBossMusic();
+    sfx.bossDie();
+    sfx.bossVictory();
+    startReward(3);
+  }
+
+  // 震动：trauma² 驱动 + 硬上限 + 低频平滑摆动（不再每帧随机换向）
+  function updateShake(dt, mul) {
+    mul = mul || 1;
+    S.trauma = Math.max(0, S.trauma - CFG.shake.decay * dt * mul);
+    S.shakeTime += dt;
+    var t2 = S.trauma * S.trauma;
+    var amp = Math.min(CFG.shake.maxOffset, t2 * CFG.shake.maxOffset);
+    var rot = Math.min(CFG.shake.maxRot, t2 * CFG.shake.maxRot);
+    var sx = (Math.sin(S.shakeTime * 26.0) * 0.6 + Math.sin(S.shakeTime * 17.0 + 1.3) * 0.4) * amp;
+    var sy = (Math.cos(S.shakeTime * 22.0 + 0.6) * 0.6 + Math.sin(S.shakeTime * 31.0 + 2.1) * 0.4) * amp * 0.75;
+    var sr = Math.sin(S.shakeTime * 13.0 + 1.9) * rot;
+    S.shakeX = clamp(sx, -CFG.shake.maxOffset, CFG.shake.maxOffset);
+    S.shakeY = clamp(sy, -CFG.shake.maxOffset, CFG.shake.maxOffset);
+    S.shakeRot = clamp(sr, -CFG.shake.maxRot, CFG.shake.maxRot);
+  }
+
+  // ===== 模拟（固定顺序：玩家 → 子弹 → 敌人 → 接触 → 生成 → 连击 → 震动 → 粒子）=====
+  function update(dt) {
+    if (S.hitStop > 0) { S.hitStop -= dt; if (S.hitStop < 0) S.hitStop = 0; return; }
+
+    S.time += dt; S.elapsed += dt;
+    updateWave(dt);
+    var p = S.player, i, j;
+
+    if (p.inv > 0) p.inv = Math.max(0, p.inv - dt);
+    if (p.shield > 0) p.shield = Math.max(0, p.shield - dt);
+    if (p.over > 0) p.over = Math.max(0, p.over - dt);
+    if (S.slow > 0) S.slow = Math.max(0, S.slow - dt);
+    p.aim = Math.atan2(input.my - p.y, input.mx - p.x);
+
+    var dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    var dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+    var dl = Math.hypot(dx, dy);
+    if (dl > 0) { dx /= dl; dy /= dl; }
+    var spd = ship().speed * (S.upgrades ? S.upgrades.speed : 1) * (1 + 0.05 * (meta ? meta.speed : 0));
+    p.x = clamp(p.x + dx * spd * dt, p.r, W - p.r);
+    p.y = clamp(p.y + dy * spd * dt, p.r, H - p.r);
+
+    S.fireCooldown -= dt;
+    if (input.firing && S.fireCooldown <= 0) shoot();
+    updateWings(dt);
+    if (S.muzzle > 0) S.muzzle = Math.max(0, S.muzzle - dt);
+
+    // 空间哈希：本帧子弹碰撞使用敌人当前坐标（网格覆盖屏幕外生成点）。
+    // 热路径内联 3×3 链表遍历、不分配候选数组：碰撞半径 ≤ 64px，必然落在 3×3 内。
+    var es = S.enemies;
+    var gridOn = es.length > 0;
+    if (gridOn) gridBuild();
+    var gHead = gridHead, gNext = gridNext, gW = GRID_W;
+
+    // 子弹：只查自身所在格的 3×3 邻域
+    for (i = S.bullets.length - 1; i >= 0; i--) {
+      var b = S.bullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      if (b.life <= 0 || b.x < -40 || b.x > W + 40 || b.y < -40 || b.y > H + 40) {
+        poolGive('bullets', S.bullets, i); continue;
+      }
+      // Boss 碰撞（Boss 不在小怪网格里；穿透弹只结算一次）
+      if (S.boss && S.boss.state === 'active' && !b.bossHit) {
+        var bossRd = S.boss.r * 0.85 + b.r;
+        var bossDx = S.boss.x - b.x, bossDy = S.boss.y - b.y;
+        if (bossDx * bossDx + bossDy * bossDy <= bossRd * bossRd) {
+          damageBoss(b.dmg, b.x, b.y);
+          b.bossHit = true;
+          if (!b.pierce) { poolGive('bullets', S.bullets, i); continue; }
+        }
+      }
+      if (S.wavePhase === 'boss') continue;   // Boss 战期间不结算小怪
+      if (!gridOn) continue;
+      var bx = b.x, by = b.y, hitE = null;
+      var bcx = gridCellX(bx), bcy = gridCellY(by);
+      var bx1 = bcx > 0 ? bcx - 1 : 0, bx2 = bcx < GRID_W - 1 ? bcx + 1 : GRID_W - 1;
+      var by1 = bcy > 0 ? bcy - 1 : 0, by2 = bcy < GRID_H - 1 ? bcy + 1 : GRID_H - 1;
+      for (var gy = by1; gy <= by2; gy++) {
+        var grow = gy * gW;
+        for (var gx = bx1; gx <= bx2; gx++) {
+          var idx = gHead[grow + gx];
+          while (idx !== -1) {
+            var e = es[idx];
+            idx = gNext[idx];
+            if (e.hp <= 0) continue;             // 本帧已击杀（移除延迟到遍历结束，保网格下标有效）
+            var er = e.r + b.r, eBx = e.x - bx, eBy = e.y - by;
+            if (eBx * eBx + eBy * eBy > er * er) continue;
+            if (b.pierce && b.hits && b.hits.indexOf(enemyUid(e)) >= 0) continue;
+            hitE = e;
+            break;
+          }
+          if (hitE !== null) break;
+        }
+        if (hitE !== null) break;
+      }
+      if (hitE === null) continue;
+      hitE.hp -= b.dmg;
+      hitE.flash = 0.09;
+      sparkBurst(bx, by, CFG.fx.hitSparks, COL.spark);
+      if (b.pierce) { b.hits.push(enemyUid(hitE)); } else { poolGive('bullets', S.bullets, i); }
+      if (hitE.hp <= 0) killEnemy(hitE);
+      if (S.upgrades && S.upgrades.chain > 0) tryChain(hitE);
+    }
+
+    // 统一回收本帧被击杀的敌人：紧凑化活跃数组（保持相对顺序，O(E)）
+    var ew = 0;
+    for (i = 0; i < es.length; i++) {
+      var ed = es[i];
+      if (ed.hp > 0) es[ew++] = ed;
+      else poolRecycle('enemies', ed);
+    }
+    es.length = ew;
+
+    if (S.wavePhase !== 'boss') {
+    // 敌人追击（时缓期间整体降速）
+    var spdF = S.slow > 0 ? 0.45 : 1;
+    for (i = S.enemies.length - 1; i >= 0; i--) {
+      var en = S.enemies[i];
+      var ex = p.x - en.x, ey = p.y - en.y;
+      var edist = Math.hypot(ex, ey) || 1;
+      var wob = Math.sin(S.time * 3 + en.phase) * 34 * spdF;
+      en.x += (ex / edist * en.spd * spdF + (-ey / edist) * wob) * dt;
+      en.y += (ey / edist * en.spd * spdF + (ex / edist) * wob) * dt;
+      if (en.flash > 0) en.flash = Math.max(0, en.flash - dt);
+      // 接触
+      var cd = Math.hypot(p.x - en.x, p.y - en.y);
+      if (cd < en.r + p.r) {
+        if (p.inv <= 0 && p.shield <= 0) {
+          hurtPlayer(en);
+          poolGive('enemies', S.enemies, i);
+          continue;
+        }
+        if (p.shield > 0) {
+          sparkBurst(en.x, en.y, 6, '#5ee8ff');
+          var srg = poolTake('rings', S.rings);
+          srg.x = en.x; srg.y = en.y; srg.r = 6; srg.r1 = 42;
+          srg.life = 0.3; srg.max = 0.3; srg.color = '#5ee8ff';
+          poolGive('enemies', S.enemies, i);
+          continue;
+        }
+        var kx = en.x - p.x, ky = en.y - p.y, kd = Math.hypot(kx, ky) || 1;
+        en.x = p.x + kx / kd * (en.r + p.r + 1);
+        en.y = p.y + ky / kd * (en.r + p.r + 1);
+      }
+    }
+
+    // 敌人之间轻推：同一张网格查邻居（只处理 i < j 的配对），替代 O(E²) 全遍历。
+    // 同样内联链表遍历，不分配候选数组。
+    if (es.length > 1) {
+      gridBuild();
+      gHead = gridHead; gNext = gridNext; gW = GRID_W;
+      for (i = 0; i < es.length; i++) {
+        var a1 = es[i];
+        var acx = gridCellX(a1.x), acy = gridCellY(a1.y);
+        var ax1 = acx > 0 ? acx - 1 : 0, ax2 = acx < GRID_W - 1 ? acx + 1 : GRID_W - 1;
+        var ay1 = acy > 0 ? acy - 1 : 0, ay2 = acy < GRID_H - 1 ? acy + 1 : GRID_H - 1;
+        for (var sgy = ay1; sgy <= ay2; sgy++) {
+          var srow = sgy * gW;
+          for (var sgx = ax1; sgx <= ax2; sgx++) {
+            var sidx = gHead[srow + sgx];
+            while (sidx !== -1) {
+              var b1 = es[sidx];
+              sidx = gNext[sidx];
+              if (b1.__idx <= i) continue;
+              var ddx = b1.x - a1.x, ddy = b1.y - a1.y;
+              var minD = a1.r + b1.r;
+              var d2 = ddx * ddx + ddy * ddy;
+              if (d2 > 0.0001 && d2 < minD * minD) {
+                var dd = Math.sqrt(d2), push = (minD - dd) * 0.5;
+                ddx /= dd; ddy /= dd;
+                a1.x -= ddx * push; a1.y -= ddy * push;
+                b1.x += ddx * push; b1.y += ddy * push;
+              }
+            }
+          }
+        }
+      }
+    }
+    }   // end wavePhase !== 'boss'
+
+    // Boss 环形弹幕：移动 + 命中玩家
+    for (i = S.ebullets.length - 1; i >= 0; i--) {
+      var eb = S.ebullets[i];
+      eb.x += eb.vx * dt; eb.y += eb.vy * dt; eb.life -= dt;
+      if (eb.life <= 0 || eb.x < -60 || eb.x > W + 60 || eb.y < -60 || eb.y > H + 60) {
+        poolGive('ebullets', S.ebullets, i); continue;
+      }
+      var edx = p.x - eb.x, edy = p.y - eb.y, er2 = eb.r + p.r;
+      if (edx * edx + edy * edy <= er2 * er2) {
+        sparkBurst(eb.x, eb.y, 4, '#ff6fae');
+        if (p.inv <= 0 && p.shield <= 0) hurtPlayer(eb);
+        poolGive('ebullets', S.ebullets, i);
+      }
+    }
+
+    // 掉落物：磁吸 + 拾取 + 过期
+    for (i = S.pickups.length - 1; i >= 0; i--) {
+      var pk = S.pickups[i];
+      pk.life -= dt;
+      if (pk.life <= 0) { poolGive('pickups', S.pickups, i); continue; }
+      var pdx = p.x - pk.x, pdy = p.y - pk.y, pd = Math.hypot(pdx, pdy) || 1;
+      var magnetR = CFG.pickup.magnet * (S.upgrades ? S.upgrades.magnet : 1);
+      if (pd < magnetR) {
+        var pull = 340 * (1 - pd / magnetR) + 120;
+        pk.x += pdx / pd * pull * dt;
+        pk.y += pdy / pd * pull * dt;
+      }
+      if (pd < p.r + CFG.pickup.radius) {
+        collectPickup(pk);
+        poolGive('pickups', S.pickups, i);
+      }
+    }
+
+    // 生成：警告期与 Boss 战停刷；波次越高刷新越快
+    if (S.wavePhase === 'normal') {
+      S.spawnTimer -= dt;
+      if (S.spawnTimer <= 0) {
+        S.spawnTimer = Math.max(CFG.enemy.spawnMin, CFG.enemy.spawnBase - S.elapsed * CFG.enemy.spawnRamp)
+          * Math.pow(0.9, Math.max(0, S.wave - 1));
+        var burst = 1 + Math.min(2, Math.floor(S.elapsed / CFG.enemy.burstEvery));
+        for (j = 0; j < burst && S.enemies.length < CFG.enemy.cap; j++) spawnEnemy();
+      }
+    }
+
+    // 连击窗口（Boss 战期间冻结，避免打 Boss 反而掉火力）
+    if (S.wavePhase !== 'boss' && S.combo > 0) {
+      S.comboTimer -= dt;
+      if (S.comboTimer <= 0) { S.combo = 0; S.comboTimer = 0; }
+    }
+    if (S.waveBanner > 0) S.waveBanner = Math.max(0, S.waveBanner - dt);
+    if (S.victoryFlash > 0) S.victoryFlash = Math.max(0, S.victoryFlash - dt);
+    if (S.sysLog) {
+      S.sysLog.t += dt;
+      if (S.sysLog.t > S.sysLog.dur) S.sysLog = null;
+    }
+    S.comboPop = Math.max(0, S.comboPop - 6 * dt);
+    updateMusicLayers();   // 连击变化 → 音乐层目标平滑切换
+    updateStory(dt);       // 连击阈值 → 碎片文本（纯数值判断 + 单次 fillText）
+
+    // 屏幕震动：trauma² 曲线 + 硬上限 + 低频平滑摆动（避免每帧随机抖动）
+    updateShake(dt);
+
+    S.hurtFlash = Math.max(0, S.hurtFlash - dt);
+
+    // 粒子：寿命到或飞出屏外即回收进池
+    for (i = S.sparks.length - 1; i >= 0; i--) {
+      var sp = S.sparks[i];
+      sp.x += sp.vx * dt; sp.y += sp.vy * dt;
+      sp.vx *= (1 - 5 * dt); sp.vy *= (1 - 5 * dt);
+      sp.life -= dt;
+      if (sp.life <= 0 || sp.x < -120 || sp.x > W + 120 || sp.y < -120 || sp.y > H + 120) {
+        poolGive('sparks', S.sparks, i);
+      }
+    }
+    for (i = S.chunks.length - 1; i >= 0; i--) {
+      var ch = S.chunks[i];
+      ch.x += ch.vx * dt; ch.y += ch.vy * dt;
+      ch.vx *= (1 - 4 * dt); ch.vy *= (1 - 4 * dt);
+      ch.rot += ch.vr * dt;
+      ch.life -= dt;
+      if (ch.life <= 0 || ch.x < -120 || ch.x > W + 120 || ch.y < -120 || ch.y > H + 120) {
+        poolGive('chunks', S.chunks, i);
+      }
+    }
+    for (i = S.rings.length - 1; i >= 0; i--) {
+      var rgp = S.rings[i];
+      rgp.life -= dt;
+      if (rgp.life <= 0) poolGive('rings', S.rings, i);
+    }
+    for (i = S.floats.length - 1; i >= 0; i--) {
+      var flp = S.floats[i];
+      flp.y += flp.vy * dt;
+      flp.life -= dt;
+      if (flp.life <= 0 || flp.y < -120) poolGive('floats', S.floats, i);
+    }
+    // 电弧视觉是瞬态：必须随普通帧一起衰减，否则会永久残留
+    for (i = S.chainFx.length - 1; i >= 0; i--) {
+      S.chainFx[i].life -= dt;
+      if (S.chainFx[i].life <= 0) S.chainFx.splice(i, 1);
+    }
+  }
+
+  // ===== 渲染 =====
+  var canvas = document.getElementById('game');
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  var ctx = canvas.getContext('2d');
+
+  function fit() {
+    var scale = Math.max(0.3, Math.min((window.innerWidth - 24) / W, (window.innerHeight - 24) / H));
+    canvas.style.width = (W * scale) + 'px';
+    canvas.style.height = (H * scale) + 'px';
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+    var g = ctx.createRadialGradient(W / 2, H / 2, 40, W / 2, H / 2, 700);
+    g.addColorStop(0, 'rgba(28, 52, 110, 0.22)');
+    g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    var off = (S.time * 14) % 60;
+    ctx.strokeStyle = COL.grid;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var x = -60 + off; x < W + 60; x += 60) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    for (var y = -60 + off; y < H + 60; y += 60) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+  }
+
+  function traceShip(shape) {
+    ctx.beginPath();
+    if (shape === 'chevron') {
+      ctx.moveTo(20, 0); ctx.lineTo(-7, 9); ctx.lineTo(-1, 0); ctx.lineTo(-7, -9);
+    } else if (shape === 'hex') {
+      ctx.moveTo(16, 0); ctx.lineTo(8, 9); ctx.lineTo(-7, 11);
+      ctx.lineTo(-13, 0); ctx.lineTo(-7, -11); ctx.lineTo(8, -9);
+    } else {
+      ctx.moveTo(17, 0); ctx.lineTo(-11, 10); ctx.lineTo(-4, 0); ctx.lineTo(-11, -10);
+    }
+    ctx.closePath();
+  }
+
+  // 渲染裁剪：屏幕外（含 margin）对象不绘制。出界对象由 update 回收，观感不变。
+  var CULL_MARGIN = 64;
+  var renderStats = { drawn: 0, culled: 0 };
+  function inView(x, y, pad) {
+    var m = CULL_MARGIN + (pad || 0);
+    return x > -m && x < W + m && y > -m && y < H + m;
+  }
+
+  function drawBoss() {
+    var b = S.boss;
+    if (!b) return;
+    var form = b.state === 'forming' ? Math.min(1, b.formT / CFG.wave.bossForm) : 1;
+    var scale = 0.4 + 0.6 * form;
+    ctx.save();
+    ctx.translate(b.x, b.y);
+    ctx.rotate(S.time * 0.35);
+    ctx.scale(scale, scale);
+    ctx.shadowColor = '#ff3f8e';
+    ctx.shadowBlur = 26;
+    ctx.fillStyle = b.flash > 0 ? '#ffffff' : '#ff3f8e';
+    ctx.beginPath();
+    for (var i = 0; i < 6; i++) {
+      var a = i * TAU / 6;
+      var px = Math.cos(a) * b.r, py = Math.sin(a) * b.r;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.rotate(-S.time * 0.9);
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = '#ffe27a';
+    ctx.beginPath();
+    for (i = 0; i < 3; i++) {
+      var a2 = i * TAU / 3 - Math.PI / 2, r2 = b.r * 0.52;
+      var qx = Math.cos(a2) * r2, qy = Math.sin(a2) * r2;
+      if (i === 0) ctx.moveTo(qx, qy); else ctx.lineTo(qx, qy);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawEBullets() {
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < S.ebullets.length; i++) {
+      var eb = S.ebullets[i];
+      ctx.fillStyle = eb.color;
+      ctx.shadowColor = eb.color;
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(eb.x, eb.y, eb.r, 0, TAU);
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawWings() {
+    var p = S.player;
+    if (!p || !S.wings.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < S.wings.length; i++) {
+      var wg = S.wings[i];
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#7fe8ff';
+      ctx.shadowColor = '#7fe8ff';
+      ctx.shadowBlur = 10;
+      var s = 7 + Math.min(3, S.wingLevel * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(wg.x, wg.y - s);
+      ctx.lineTo(wg.x + s * 0.8, wg.y);
+      ctx.lineTo(wg.x, wg.y + s);
+      ctx.lineTo(wg.x - s * 0.8, wg.y);
+      ctx.closePath();
+      ctx.fill();
+      if (wg.flash > 0) {
+        ctx.globalAlpha = wg.flash / 0.12;
+        ctx.strokeStyle = '#dff7ff';
+        ctx.beginPath();
+        ctx.arc(wg.x, wg.y, 10, 0, TAU);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawChainFx() {
+    if (!S.chainFx.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 1.8;
+    for (var i = 0; i < S.chainFx.length; i++) {
+      var fx = S.chainFx[i];
+      var a = fx.life / fx.max;
+      ctx.globalAlpha = a;
+      ctx.strokeStyle = fx.color;
+      ctx.beginPath();
+      ctx.moveTo(fx.x1, fx.y1);
+      var mx = (fx.x1 + fx.x2) / 2, my = (fx.y1 + fx.y2) / 2;
+      var px = -(fx.y2 - fx.y1), py = fx.x2 - fx.x1;
+      var len = Math.sqrt(px * px + py * py) || 1;
+      ctx.lineTo(mx + px / len * 10, my + py / len * 10);
+      ctx.lineTo(fx.x2, fx.y2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawWorld() {
+    var i, t, p = S.player;
+    renderStats.drawn = 0;
+    renderStats.culled = 0;
+
+    // 扩散环 + 火花（加色）
+    ctx.globalCompositeOperation = 'lighter';
+    for (i = 0; i < S.rings.length; i++) {
+      var rg = S.rings[i];
+      if (!inView(rg.x, rg.y, rg.r1 + 2)) { renderStats.culled++; continue; }
+      renderStats.drawn++;
+      t = 1 - rg.life / rg.max;
+      ctx.globalAlpha = (rg.life / rg.max) * 0.9;
+      ctx.strokeStyle = rg.color;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(rg.x, rg.y, rg.r + (rg.r1 - rg.r) * t, 0, TAU);
+      ctx.stroke();
+    }
+    for (i = 0; i < S.sparks.length; i++) {
+      var sp = S.sparks[i];
+      if (!inView(sp.x, sp.y, sp.size + 12)) { renderStats.culled++; continue; }
+      renderStats.drawn++;
+      ctx.globalAlpha = Math.max(0, sp.life / sp.max);
+      ctx.strokeStyle = sp.color;
+      ctx.lineWidth = sp.size;
+      ctx.beginPath();
+      ctx.moveTo(sp.x, sp.y);
+      ctx.lineTo(sp.x - sp.vx * 0.02, sp.y - sp.vy * 0.02);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+
+    // 碎片
+    for (i = 0; i < S.chunks.length; i++) {
+      var ch = S.chunks[i];
+      if (!inView(ch.x, ch.y, ch.size + 8)) { renderStats.culled++; continue; }
+      renderStats.drawn++;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, ch.life / ch.max);
+      ctx.translate(ch.x, ch.y);
+      ctx.rotate(ch.rot);
+      ctx.fillStyle = ch.color;
+      ctx.fillRect(-ch.size / 2, -ch.size / 2, ch.size, ch.size);
+      ctx.restore();
+    }
+
+    // 子弹（不同枪型不同颜色/长度；穿透弹更细更长）
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.shadowColor = '#9ff6ff';
+    ctx.shadowBlur = 10;
+    for (i = 0; i < S.bullets.length; i++) {
+      var b = S.bullets[i];
+      if (!inView(b.x, b.y, b.pierce ? 48 : 30)) { renderStats.culled++; continue; }
+      renderStats.drawn++;
+      ctx.strokeStyle = b.color || COL.bullet;
+      ctx.lineWidth = b.pierce ? 2.5 : 3;
+      ctx.beginPath();
+      ctx.moveTo(b.x - b.vx * (b.pierce ? 0.03 : 0.018), b.y - b.vy * (b.pierce ? 0.03 : 0.018));
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+    ctx.globalCompositeOperation = 'source-over';
+
+    // 敌人
+    for (i = 0; i < S.enemies.length; i++) {
+      var e = S.enemies[i];
+      if (!inView(e.x, e.y, e.r + 10)) { renderStats.culled++; continue; }
+      renderStats.drawn++;
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.rotate(S.time * 2 + e.phase);
+      ctx.shadowColor = COL.enemy;
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = e.flash > 0 ? '#ffffff' : COL.enemy;
+      ctx.beginPath();
+      ctx.moveTo(0, -e.r);
+      ctx.lineTo(e.r * 0.86, 0);
+      ctx.lineTo(0, e.r);
+      ctx.lineTo(-e.r * 0.86, 0);
+      ctx.closePath();
+      ctx.fill();
+      if (e.maxHp > 1) {
+        ctx.rotate(-(S.time * 2 + e.phase));
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, e.r + 5, -Math.PI / 2, -Math.PI / 2 + TAU * (e.hp / e.maxHp));
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Boss + 环形弹幕
+    if (S.boss) drawBoss();
+    drawEBullets();
+    drawChainFx();
+
+    // 掉落物（最后 3 秒闪烁）
+    for (i = 0; i < S.pickups.length; i++) {
+      var pk = S.pickups[i];
+      if (!inView(pk.x, pk.y, 26)) { renderStats.culled++; continue; }
+      renderStats.drawn++;
+      var info = CFG.pickupInfo[pk.type];
+      var pa = pk.life < 3 ? 0.35 + 0.65 * Math.abs(Math.sin(S.time * 10)) : 1;
+      ctx.save();
+      ctx.translate(pk.x, pk.y);
+      ctx.rotate(S.time * 1.6 + pk.bob);
+      ctx.globalAlpha = pa;
+      ctx.shadowColor = info.color;
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = info.color;
+      ctx.fillRect(-10, -10, 20, 20);
+      ctx.restore();
+      ctx.save();
+      ctx.translate(pk.x, pk.y);
+      ctx.globalAlpha = pa;
+      ctx.fillStyle = '#0b1020';
+      ctx.font = '800 13px ' + FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(info.glyph, 0, 0);
+      ctx.restore();
+    }
+
+    drawWings();
+
+    // 玩家（按机型换外形/颜色，无敌时闪烁）
+    var sh = ship();
+    var blink = p.inv > 0 && Math.floor(S.time * 22) % 2 === 0;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.aim);
+    ctx.scale(p.r / 12, p.r / 12);
+    ctx.globalAlpha = blink ? 0.35 : 1;
+    ctx.shadowColor = sh.color;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = sh.color;
+    traceShip(sh.shape);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(2, 0, 3, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    // 护盾环
+    if (p.shield > 0) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.globalAlpha = 0.5 + 0.3 * Math.sin(S.time * 12);
+      ctx.strokeStyle = '#5ee8ff';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#5ee8ff';
+      ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.arc(0, 0, p.r + 10, 0, TAU);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 枪口闪光
+    if (S.muzzle > 0) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.aim);
+      ctx.globalAlpha = S.muzzle / CFG.fx.muzzle;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = '#fff6a8';
+      ctx.beginPath();
+      ctx.moveTo(18, 0); ctx.lineTo(32, 6); ctx.lineTo(32, -6);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 浮动文字
+    for (i = 0; i < S.floats.length; i++) {
+      var fl = S.floats[i];
+      if (!inView(fl.x, fl.y, 100)) { renderStats.culled++; continue; }
+      renderStats.drawn++;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, fl.life / fl.max);
+      ctx.fillStyle = fl.color;
+      ctx.font = '800 ' + fl.size + 'px ' + FONT;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(fl.text, fl.x, fl.y);
+      ctx.restore();
+    }
+  }
+
+  function bar(x, y, w, h, pct, color) {
+    ctx.fillStyle = 'rgba(120, 150, 200, 0.18)';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w * clamp(pct, 0, 1), h);
+  }
+
+  function drawWaveWarning() {
+    var a = 0.20 + 0.12 * Math.sin(S.time * 9);
+    ctx.save();
+    ctx.globalAlpha = a * 0.42;
+    ctx.fillStyle = '#ff2d5e';
+    ctx.fillRect(0, 0, W, H);        // 全屏红光脉冲
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#ff2d5e';
+    var e = 46;
+    ctx.fillRect(0, 0, W, e);
+    ctx.fillRect(0, H - e, W, e);
+    ctx.fillRect(0, 0, e, H);
+    ctx.fillRect(W - e, 0, e, H);
+    ctx.restore();
+    ctx.save();
+    ctx.globalAlpha = 0.45 + 0.35 * Math.sin(S.time * 9);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5c86';
+    ctx.font = '600 13px ' + FONT;
+    ctx.fillText('WARNING // 高能信号接近', W / 2, 142);
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    var p = S.player, sh = ship(), w = weapon();
+    ctx.textBaseline = 'middle';
+
+    // HP（按机型上限）
+    ctx.textAlign = 'left';
+    for (var i = 0; i < p.maxHp; i++) {
+      var x = 32 + i * 28, y = 34;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 10); ctx.lineTo(x + 9, y); ctx.lineTo(x, y + 10); ctx.lineTo(x - 9, y);
+      ctx.closePath();
+      if (i < p.hp) {
+        ctx.fillStyle = sh.color;
+        ctx.shadowColor = sh.color;
+        ctx.shadowBlur = 10;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      } else {
+        ctx.strokeStyle = 'rgba(120, 150, 200, 0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+
+    // 波次
+    ctx.textAlign = 'left';
+    ctx.font = '600 13px ' + FONT;
+    ctx.fillStyle = S.wavePhase === 'warning' ? '#ff5c86' : (S.wavePhase === 'boss' ? '#ff8fb8' : '#9fc4ff');
+    ctx.fillText('WAVE ' + S.wave + (S.wavePhase === 'boss' ? ' · BOSS' : ''), 32, 66);
+
+    // Boss 血条
+    if (S.boss) {
+      var bbw = 420, bbh = 8, bbx = (W - bbw) / 2, bby = 72;
+      var hpRatio = S.boss.maxHp > 0 ? S.boss.hp / S.boss.maxHp : 0;
+      ctx.fillStyle = 'rgba(255, 63, 142, 0.16)';
+      ctx.fillRect(bbx, bby, bbw, bbh);
+      ctx.fillStyle = '#ff3f8e';
+      ctx.fillRect(bbx, bby, bbw * clamp(hpRatio, 0, 1), bbh);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffb0d0';
+      ctx.font = '600 11px ' + FONT;
+      ctx.fillText('BOSS · WAVE ' + S.wave + ' · ' + Math.max(0, Math.ceil(S.boss.hp)) + ' / ' + S.boss.maxHp, W / 2, bby + 18);
+    }
+
+    // 波次横幅
+    if (S.waveBanner > 0) {
+      var wa = clamp(S.waveBanner / 2.2, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = wa * 0.85;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#9EE7FF';
+      ctx.font = '800 34px ' + FONT;
+      ctx.fillText(S.waveBannerText, W / 2, H / 2 - 150);
+      ctx.restore();
+    }
+
+    // 分数
+    ctx.textAlign = 'center';
+    ctx.fillStyle = COL.text;
+    ctx.font = '700 30px ' + FONT;
+    ctx.fillText(String(S.score).padStart(5, '0'), W / 2, 36);
+    ctx.fillStyle = COL.dim;
+    ctx.font = '600 11px ' + FONT;
+    ctx.fillText('SCORE', W / 2, 60);
+
+    // 击杀 / 时间
+    ctx.textAlign = 'right';
+    ctx.font = '600 13px ' + FONT;
+    ctx.fillStyle = '#9fc4ff';
+    ctx.fillText(S.kills + ' KILLS', W - 30, 30);
+    ctx.fillText(S.elapsed.toFixed(1) + ' s', W - 30, 50);
+
+    // 自适应音乐层指示：K 底鼓 / H 踩镲 / B 贝斯 / A 琶音
+    var tier = musicTier(S.combo);
+    var pipColors = ['#eaf6ff', '#5ee8ff', '#ffb03f', '#ff6fae'];
+    for (var mi = 0; mi < 4; mi++) {
+      var lit = !bossMusic.wanted && (mi === 0 || tier >= mi);
+      ctx.fillStyle = lit ? pipColors[mi] : 'rgba(120, 150, 200, 0.18)';
+      ctx.fillRect(W - 118 + mi * 22, 70, 14, 6);
+    }
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(150, 180, 230, 0.45)';
+    ctx.font = '500 10px ' + FONT;
+    if (bossMusic.wanted) {
+      ctx.fillText('BPM ' + bossMusic.bpm + ' · BOSS THEME', W - 30, 88);
+    } else {
+      ctx.fillText('BPM ' + BPM + ' · MUSIC L' + (tier + 1), W - 30, 88);
+    }
+
+    // 连击
+    ctx.textAlign = 'left';
+    var cx = 34, cy = H - 96;
+    ctx.save();
+    ctx.translate(cx, cy);
+    var sc = 1 + S.comboPop * 0.35;
+    ctx.scale(sc, sc);
+    ctx.font = '800 46px ' + FONT;
+    ctx.fillStyle = S.combo > 0 ? '#ffe27a' : 'rgba(180, 200, 240, 0.22)';
+    ctx.fillText('\u00d7' + S.combo, 0, 0);
+    ctx.restore();
+
+    bar(cx, H - 66, 230, 6, S.comboTimer / comboWindow(),
+        S.combo > 0 ? '#ffd45e' : 'rgba(120, 150, 200, 0.25)');
+
+    ctx.font = '600 12px ' + FONT;
+    ctx.fillStyle = '#8fb8ff';
+    ctx.fillText(
+      'WPN ' + w.name + ' · ' + (1 / fireInterval()).toFixed(1) + ' 发/s · ' +
+      pellets() + ' 弹 · 伤害 ' + damage().toFixed(1),
+      cx, H - 46
+    );
+    ctx.fillStyle = '#7fe8ff';
+    ctx.font = '600 11px ' + FONT;
+    ctx.fillText('WING \u00d7' + S.wingCount + ' \u00b7 Lv.' + S.wingLevel, cx, H - 30);
+
+    // 增益计时
+    var chips = [];
+    if (p.shield > 0) chips.push(['护盾', p.shield, 3.5, '#5ee8ff']);
+    if (p.over > 0) chips.push(['超载', p.over, 8, '#ffb03f']);
+    if (S.slow > 0) chips.push(['时缓', S.slow, 4.5, '#b98cff']);
+    for (var c = 0; c < chips.length; c++) {
+      var chY = H - 176 - c * 26;
+      ctx.textAlign = 'left';
+      ctx.font = '600 12px ' + FONT;
+      ctx.fillStyle = chips[c][3];
+      ctx.fillText(chips[c][0] + ' ' + chips[c][1].toFixed(1) + 's', cx, chY);
+      bar(cx, chY + 8, 120, 4, chips[c][1] / chips[c][2], chips[c][3]);
+    }
+
+    // 底部提示
+    ctx.textAlign = 'center';
+    if (!actx) {
+      ctx.fillStyle = 'rgba(255, 210, 120, 0.85)';
+      ctx.font = '600 13px ' + FONT;
+      ctx.fillText('点击或按任意键开启音效与 BGM', W / 2, H - 40);
+    }
+    ctx.font = '500 12px ' + FONT;
+    ctx.fillStyle = 'rgba(140, 170, 220, 0.5)';
+    ctx.fillText('WASD 移动 · 鼠标瞄准 · 按住左键开火 · R 重开 · P 暂停 · M 静音', W / 2, H - 16);
+  }
+
+  function drawHurt() {
+    var p = S.player;
+    var a = S.hurtFlash / CFG.fx.hurtFlash;
+    if (p.hp === 1) a = Math.max(a, 0.10 + 0.05 * Math.sin(S.time * 6));
+    if (a <= 0) return;
+    var g = ctx.createRadialGradient(W / 2, H / 2, H * 0.32, W / 2, H / 2, H * 0.95);
+    g.addColorStop(0, 'rgba(255, 40, 90, 0)');
+    g.addColorStop(1, 'rgba(255, 30, 80, ' + (0.55 * a) + ')');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawFPS() {
+    ctx.textAlign = 'right';
+    ctx.font = '500 11px ' + FONT;
+    ctx.fillStyle = 'rgba(120, 150, 200, 0.4)';
+    ctx.fillText(fps.toFixed(0) + ' FPS', W - 30, H - 40);
+  }
+
+  function cardRect(i) {
+    var cw = 220, ch = 244, gap = 26;
+    var total = cw * 3 + gap * 2;
+    var x0 = (W - total) / 2;
+    return { x: x0 + i * (cw + gap), y: 232, w: cw, h: ch };
+  }
+
+  function menuRects() {
+    var labels = [
+      '声音：' + (muted ? '关' : '开') + ' (M)',
+      '全屏：' + (document.fullscreenElement ? '开' : '关') + ' (F)',
+      '系统升级 (U)',
+      Date.now() < menu.resetUntil ? '再次点击确认' : '重置最高分'
+    ];
+    var widths = [132, 120, 148, 158], gap = 14;
+    var total = 0, i;
+    for (i = 0; i < widths.length; i++) total += widths[i];
+    total += gap * (widths.length - 1);
+    var x = (W - total) / 2;
+    var out = [];
+    for (i = 0; i < widths.length; i++) {
+      out.push({ x: x, y: 512, w: widths[i], h: 34, label: labels[i], index: i });
+      x += widths[i] + gap;
+    }
+    return out;
+  }
+
+  function menuHit(mx, my) {
+    var rs = menuRects();
+    for (var i = 0; i < rs.length; i++) {
+      if (mx >= rs[i].x && mx <= rs[i].x + rs[i].w && my >= rs[i].y && my <= rs[i].y + rs[i].h) return i;
+    }
+    return -1;
+  }
+
+  function toggleMute() {
+    muted = !muted;
+    applyMute();
+    if (!muted && actx && actx.state === 'suspended') {
+      try { actx.resume(); } catch (e) {}
+    }
+  }
+
+  function toggleFullscreen() {
+    try {
+      if (!document.fullscreenElement) {
+        var p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+        if (p && p.catch) p.catch(function () {});
+      } else {
+        var q = document.exitFullscreen && document.exitFullscreen();
+        if (q && q.catch) q.catch(function () {});
+      }
+    } catch (e) {}
+  }
+
+  function menuAction(i) {
+    if (i === 0) { toggleMute(); sfx.uiHover(); return; }
+    if (i === 1) { toggleFullscreen(); sfx.uiHover(); return; }
+    if (i === 2) { openMeta(); return; }
+    if (i === 3) {
+      var now = Date.now();
+      if (menu.resetUntil && now < menu.resetUntil) {
+        best = 0; saveBest(); menu.resetUntil = 0; sfx.uiBack();
+      } else {
+        menu.resetUntil = now + 2500; sfx.uiHover();
+      }
+    }
+  }
+
+  function syncCursor() {
+    var hide = S.mode === 'playing';
+    if (hide !== cursorHidden) {
+      cursorHidden = hide;
+      canvas.style.cursor = hide ? 'none' : 'default';
+    }
+  }
+
+  function metaRowRect(i) {
+    return { x: 120, y: 160 + i * 86, w: 720, h: 74 };
+  }
+  function metaBuyRect(i) {
+    var r = metaRowRect(i);
+    return { x: r.x + r.w - 156, y: r.y + 19, w: 136, h: 36 };
+  }
+  function metaCloseRect() {
+    return { x: W - 150, y: 82, w: 110, h: 32 };
+  }
+
+  function metaHit(mx, my) {
+    var cr = metaCloseRect();
+    if (mx >= cr.x && mx <= cr.x + cr.w && my >= cr.y && my <= cr.y + cr.h) return { type: 'close' };
+    for (var i = 0; i < META_DEFS.length; i++) {
+      var br = metaBuyRect(i);
+      if (mx >= br.x && mx <= br.x + br.w && my >= br.y && my <= br.y + br.h) {
+        return { type: 'buy', index: i };
+      }
+      var r = metaRowRect(i);
+      if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) {
+        return { type: 'row', index: i };
+      }
+    }
+    return null;
+  }
+
+  function openMeta() {
+    if (S.mode !== 'select' && S.mode !== 'dead') return;
+    S.metaOpen = true;
+    S.metaHover = -1;
+    sfx.upgradeOpen();
+  }
+
+  function closeMeta() {
+    S.metaOpen = false;
+    S.metaHover = -1;
+    sfx.uiBack();
+  }
+
+  function drawMeta() {
+    ctx.save();
+    ctx.globalAlpha = 0.985;
+    ctx.fillStyle = '#03040a';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = '#5ee8ff';
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = '#eaf6ff';
+    ctx.font = '800 30px ' + FONT;
+    ctx.fillText('SYSTEM UPGRADE TREE', W / 2, 88);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#ffd45e';
+    ctx.font = '600 14px ' + FONT;
+    ctx.fillText('系统升级树 · 数据碎片 \u25c6 ' + meta.shards, W / 2, 120);
+    ctx.restore();
+
+    var cr = metaCloseRect();
+    ctx.save();
+    ctx.fillStyle = 'rgba(12, 18, 34, 0.9)';
+    ctx.strokeStyle = 'rgba(160, 190, 240, 0.5)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.rect(cr.x, cr.y, cr.w, cr.h); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#cfe0f5';
+    ctx.font = '600 12px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('关闭 (U)', cr.x + cr.w / 2, cr.y + cr.h / 2 + 1);
+    ctx.restore();
+
+    for (var i = 0; i < META_DEFS.length; i++) {
+      var d = META_DEFS[i], r = metaRowRect(i), br = metaBuyRect(i);
+      var lv = meta[d.id], maxed = lv >= d.max, cost = metaCost(d);
+      var canBuy = !maxed && meta.shards >= cost;
+      var hover = S.metaHover === i;
+      ctx.save();
+      ctx.fillStyle = hover ? 'rgba(22, 36, 62, 0.96)' : 'rgba(10, 16, 30, 0.9)';
+      ctx.strokeStyle = canBuy ? d.color : 'rgba(110, 130, 170, 0.28)';
+      ctx.lineWidth = hover ? 2 : 1.2;
+      ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.fill(); ctx.stroke();
+
+      ctx.textAlign = 'left';
+      ctx.fillStyle = d.color;
+      ctx.font = '800 17px ' + FONT;
+      ctx.fillText(d.name, r.x + 20, r.y + 25);
+      ctx.fillStyle = 'rgba(190, 210, 240, 0.6)';
+      ctx.font = '400 12px ' + FONT;
+      ctx.fillText(d.desc, r.x + 20, r.y + 49);
+
+      // 等级刻度
+      for (var p = 0; p < d.max; p++) {
+        var px = r.x + 390 + p * 24, py = r.y + 34;
+        ctx.beginPath();
+        ctx.moveTo(px, py - 8); ctx.lineTo(px + 7, py); ctx.lineTo(px, py + 8); ctx.lineTo(px - 7, py);
+        ctx.closePath();
+        if (p < lv) { ctx.fillStyle = d.color; ctx.fill(); }
+        else { ctx.strokeStyle = 'rgba(120, 150, 200, 0.35)'; ctx.lineWidth = 1.2; ctx.stroke(); }
+      }
+      ctx.fillStyle = 'rgba(150, 180, 230, 0.5)';
+      ctx.font = '500 11px ' + FONT;
+      ctx.fillText('Lv.' + lv + ' / ' + d.max, r.x + 390, r.y + 56);
+
+      ctx.fillStyle = maxed ? 'rgba(120, 150, 200, 0.12)' :
+        (canBuy ? (hover ? 'rgba(94, 232, 255, 0.22)' : 'rgba(12, 18, 34, 0.9)') : 'rgba(120, 150, 200, 0.08)');
+      ctx.strokeStyle = maxed ? 'rgba(120, 150, 200, 0.3)' : (canBuy ? (hover ? '#5ee8ff' : 'rgba(94, 232, 255, 0.55)') : 'rgba(120, 150, 200, 0.22)');
+      ctx.lineWidth = hover ? 2 : 1.2;
+      ctx.beginPath(); ctx.rect(br.x, br.y, br.w, br.h); ctx.fill(); ctx.stroke();
+      ctx.textAlign = 'center';
+      ctx.fillStyle = maxed ? 'rgba(160, 180, 220, 0.5)' : (canBuy ? '#dff7ff' : 'rgba(140, 160, 200, 0.45)');
+      ctx.font = '700 12px ' + FONT;
+      ctx.fillText(maxed ? 'MAX' : ('升级 \u25c6' + cost), br.x + br.w / 2, br.y + br.h / 2 + 1);
+      ctx.restore();
+    }
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(140, 170, 220, 0.45)';
+    ctx.font = '400 12px ' + FONT;
+    ctx.fillText('数据碎片来自 Boss 残骸（每击杀 1 只 Boss +1） · 永久强化在下一局生效 · U / Esc 关闭', W / 2, 548);
+    ctx.restore();
+  }
+
+  function drawCrosshair() {
+    var x = input.mx, y = input.my;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = '#9feaff';
+    ctx.fillStyle = '#eaffff';
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(x, y, 8, 0, TAU);
+    ctx.stroke();
+    for (var i = 0; i < 4; i++) {
+      var a = i * Math.PI / 2 + Math.PI / 4;
+      var c = Math.cos(a), s = Math.sin(a);
+      ctx.beginPath();
+      ctx.moveTo(x + c * 12, y + s * 12);
+      ctx.lineTo(x + c * 17, y + s * 17);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(x, y, 1.5, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawSelect() {
+    var sa = clamp((S.selectT || 0) / 0.35, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = sa;
+    ctx.fillStyle = 'rgba(3, 4, 10, 0.90)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.save();
+    ctx.shadowColor = COL.player;
+    ctx.shadowBlur = 28;
+    ctx.fillStyle = COL.text;
+    ctx.font = '800 56px ' + FONT;
+    ctx.fillText('NEON SWARM', W / 2, 118);
+    ctx.restore();
+    ctx.fillStyle = COL.dim;
+    ctx.font = '600 14px ' + FONT;
+    ctx.fillText('街机爽感原型 · 选择机型', W / 2, 166);
+
+    for (var i = 0; i < SHIP_ORDER.length; i++) {
+      var id = SHIP_ORDER[i], sh = CFG.ships[id], r = cardRect(i);
+      ctx.fillStyle = 'rgba(12, 18, 34, 0.85)';
+      ctx.strokeStyle = 'rgba(120, 160, 255, 0.25)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.rect(r.x, r.y, r.w, r.h);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = 'rgba(150, 190, 255, 0.6)';
+      ctx.font = '600 12px ' + FONT;
+      ctx.textAlign = 'left';
+      ctx.fillText('[' + (i + 1) + ']', r.x + 16, r.y + 18);
+
+      ctx.save();
+      ctx.translate(r.x + r.w / 2, r.y + 82);
+      ctx.rotate(-Math.PI / 2);
+      ctx.scale(sh.r / 12, sh.r / 12);
+      ctx.shadowColor = sh.color;
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = sh.color;
+      traceShip(sh.shape);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = sh.color;
+      ctx.font = '800 22px ' + FONT;
+      ctx.fillText(sh.name, r.x + r.w / 2, r.y + 140);
+      ctx.fillStyle = 'rgba(190, 210, 240, 0.65)';
+      ctx.font = '600 12px ' + FONT;
+      ctx.fillText(sh.desc, r.x + r.w / 2, r.y + 166);
+      ctx.fillStyle = 'rgba(150, 180, 230, 0.5)';
+      ctx.font = '500 11px ' + FONT;
+      ctx.fillText('速度 ' + sh.speed + ' · 射速 ×' + sh.fire.toFixed(2) + ' · 伤害 ×' + sh.dmg.toFixed(2),
+        r.x + r.w / 2, r.y + 194);
+      bar(r.x + 24, r.y + 214, r.w - 48, 4, sh.hp / 4, '#6dffb0');
+      ctx.fillStyle = 'rgba(150, 180, 230, 0.4)';
+      ctx.font = '500 10px ' + FONT;
+      ctx.fillText('HP ' + sh.hp, r.x + r.w / 2, r.y + 228);
+    }
+
+    ctx.fillStyle = best > 0 ? '#ffd45e' : 'rgba(150, 180, 230, 0.45)';
+    ctx.font = '600 13px ' + FONT;
+    ctx.fillText('BEST ' + String(best).padStart(5, '0') + '  ·  碎片 \u25c6' + meta.shards, W / 2, 494);
+
+    var brs = menuRects();
+    for (var b = 0; b < brs.length; b++) {
+      var br = brs[b], bh = menu.hover === b;
+      var accent = b === 3 ? '#ff6fae' : (b === 2 ? '#ffd45e' : '#5ee8ff');
+      ctx.fillStyle = bh ? 'rgba(24, 40, 70, 0.95)' : 'rgba(12, 18, 34, 0.85)';
+      ctx.strokeStyle = bh ? accent : (b === 3 ? 'rgba(255, 111, 174, 0.65)' : 'rgba(120, 160, 255, 0.35)');
+      ctx.lineWidth = bh ? 2 : 1.2;
+      ctx.beginPath();
+      ctx.rect(br.x, br.y, br.w, br.h);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = b === 3 ? '#ff9fc4' : (b === 2 ? '#ffd45e' : (bh ? '#dff7ff' : 'rgba(180, 205, 240, 0.75)'));
+      ctx.font = '600 12px ' + FONT;
+      ctx.fillText(br.label, br.x + br.w / 2, br.y + br.h / 2 + 1);
+    }
+
+    ctx.fillStyle = COL.dim;
+    ctx.font = '500 13px ' + FONT;
+    ctx.fillText('按 1 / 2 / 3 或点击卡片开始', W / 2, 564);
+    if (!actx) {
+      ctx.fillStyle = 'rgba(255, 210, 120, 0.9)';
+      ctx.font = '600 13px ' + FONT;
+      ctx.fillText('点击屏幕 / 按键启用声音（Web Audio 实时合成）', W / 2, 584);
+    }
+    ctx.restore();
+  }
+
+  // 死亡报告由剧情阶段决定：没看见真相 = 训练报告；看见了 = 行动报告
+  function buildDeathReport() {
+    var phase = story.phase < 0 ? 0 : story.phase;
+    var grade = S.score >= 3000 ? 'S' : S.score >= 1500 ? 'A' : S.score >= 600 ? 'B' : 'C';
+    var stats = '读数 ' + S.score + ' 分 · ' + S.kills + ' 击杀 · 峰值连击 ' + S.maxCombo;
+    var report = { phase: phase, title: '', lines: [], hint: '' };
+    if (phase === 0) {
+      report.title = '训练终止';
+      report.lines = ['学员状态：离线', stats, '评估：' + grade + '（模拟标准）', '备注：本训练不计入真实伤亡。'];
+      report.hint = '按 R 返回机库';
+    } else if (phase === 1) {
+      report.title = '训练异常终止';
+      report.lines = ['学员状态：离线（异常）', stats, '评估：' + grade + '（数据不完整）', '备注：靶机数量与记录不符。', '异常代码：0x4E4F'];
+      report.hint = '按 R 返回机库';
+    } else {
+      report.title = '行动终止';
+      report.lines = ['目标确认：非模拟生命体', stats, '评估：A（超出授权）', '备注：系统从未被授权告知您这一点。'];
+      report.hint = '按 R 返回机库';
+    }
+    report.lines.push('Boss 残骸 +' + (S.shardsEarned || 0) + ' · 持有 ' + meta.shards);
+    report.hint = '按 R 返回机库 · 按 U 系统升级树';
+    return report;
+  }
+
+  function updateDeath(dt) {
+    S.deathT += dt;
+    S.hurtFlash = Math.max(0, S.hurtFlash - dt);
+  }
+
+  function drawVictoryFlash() {
+    if (S.victoryFlash <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = 0.32 * Math.min(1, S.victoryFlash / 0.35);
+    ctx.fillStyle = '#ffd45e';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  function drawRewardTint() {
+    var k = clamp(S.rewardT / S.rewardDur, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = 0.16 * (1 - k * 0.45);
+    var g = ctx.createRadialGradient(W / 2, H / 2, H * 0.18, W / 2, H / 2, H * 0.82);
+    g.addColorStop(0, 'rgba(255, 212, 94, 0)');
+    g.addColorStop(1, 'rgba(255, 212, 94, 0.6)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  function drawSysLog() {
+    var l = S.sysLog;
+    if (!l) return;
+    var a = Math.min(1, l.t / 0.12) * Math.min(1, (l.dur - l.t) / 0.35);
+    if (a <= 0) return;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = a * 0.9;
+    ctx.font = '500 11px ' + FONT;
+    var tw = ctx.measureText(l.text).width;
+    ctx.fillStyle = 'rgba(3, 4, 10, 0.78)';
+    ctx.fillRect(W / 2 - tw / 2 - 12, H - 102, tw + 24, 20);
+    ctx.strokeStyle = 'rgba(255, 212, 94, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(W / 2 - tw / 2 - 12, H - 102, tw + 24, 20);
+    ctx.fillStyle = '#ffd45e';
+    ctx.fillText(l.text, W / 2, H - 88);
+    ctx.restore();
+  }
+
+  // 渐暗 → 报告逐行浮现 → 重开提示：全程只改 alpha，无额外层级
+  function drawDeathOverlay() {
+    var t = S.deathT, r = S.deathReport;
+    var fade = clamp(t / 0.9, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = 0.9 * fade;
+    ctx.fillStyle = '#03040a';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+    if (!r) return;
+
+    var a0 = Math.min(1, Math.max(0, (t - 0.35) / 0.5));
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = a0 * 0.9;
+    ctx.fillStyle = r.phase === 2 ? '#ff6fae' : '#9EE7FF';
+    ctx.font = '800 28px ' + FONT;
+    ctx.fillText(r.title, W / 2, H / 2 - 120);
+    ctx.globalAlpha = a0 * 0.3;
+    ctx.fillStyle = '#9EE7FF';
+    ctx.fillRect(W / 2 - 150, H / 2 - 96, 300, 1);
+    if (Math.floor(t * 2) % 2 === 0) {
+      ctx.globalAlpha = a0 * 0.6;
+      ctx.fillStyle = '#ff3f8e';
+      ctx.fillRect(W / 2 + 152, H / 2 - 128, 6, 6);
+    }
+    ctx.restore();
+
+    for (var i = 0; i < r.lines.length; i++) {
+      var la = Math.min(1, Math.max(0, (t - 0.65 - i * 0.28) / 0.45));
+      if (la <= 0) continue;
+      ctx.save();
+      ctx.globalAlpha = la * (i === 0 ? 0.85 : 0.6);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = i === 0 ? '#eaf6ff' : '#9fb8d8';
+      ctx.font = (i === 0 ? '600 15px ' : '400 13px ') + FONT;
+      ctx.fillText(r.lines[i], W / 2, H / 2 - 58 + i * 26);
+      ctx.restore();
+    }
+
+    var hintAt = 0.65 + r.lines.length * 0.28;
+    var ha = Math.min(1, Math.max(0, (t - hintAt) / 0.5));
+    if (ha > 0) {
+      ctx.save();
+      ctx.globalAlpha = ha * (0.4 + 0.2 * Math.sin(t * 4));
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#9EE7FF';
+      ctx.font = '500 13px ' + FONT;
+      ctx.fillText(r.hint, W / 2, H / 2 + 108);
+      ctx.restore();
+    }
+  }
+
+  function drawOverlay() {
+    if (S.mode === 'paused') {
+      ctx.fillStyle = 'rgba(3, 4, 10, 0.72)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = 'center';
+      ctx.font = '800 44px ' + FONT;
+      ctx.fillStyle = COL.player;
+      ctx.fillText('已暂停', W / 2, H / 2 - 10);
+      ctx.font = '500 15px ' + FONT;
+      ctx.fillStyle = COL.dim;
+      ctx.fillText('按 P 继续', W / 2, H / 2 + 44);
+    }
+    if (S.mode === 'dead') drawDeathOverlay();
+  }
+
+  // ===== 叙事逻辑：阶段只升不降；同阶段按顺序循环；全局 6s 冷却 =====
+  function storyPhaseFor(combo) {
+    if (combo >= 80) return 2;
+    if (combo >= 30) return 1;
+    return 0;
+  }
+
+  function showStory(phase) {
+    var pool = STORY_LINES[STORY_KEYS[phase]];
+    var idx = story.cursor[phase] % pool.length;
+    story.cursor[phase] = idx + 1;
+    if (phase > story.phase) story.phase = phase;
+    story.text = pool[idx].text;
+    story.t = 0;
+    story.cooldown = 6;
+    story.nextTrigger = (Math.floor(S.combo / 10) + 1) * 10;
+    if (phase === 2) story.flicker = 0.55;
+  }
+
+  function updateStory(dt) {
+    if (story.cooldown > 0) story.cooldown -= dt;
+    if (story.flicker > 0) story.flicker = Math.max(0, story.flicker - dt);
+    if (story.t >= 0) {
+      story.t += dt;
+      if (story.t > story.dur) story.t = -1;
+    }
+    if (story.phase < 0) { showStory(0); return; }
+    var np = storyPhaseFor(S.combo);
+    if (np > story.phase) { showStory(np); return; }
+    if (S.combo > 0 && S.combo >= story.nextTrigger && story.cooldown <= 0) {
+      showStory(story.phase);
+    }
+  }
+
+  // 真相期 0.55s 屏幕闪烁：一次全屏 fillRect，无额外层级
+  function drawStoryFlicker() {
+    if (story.flicker <= 0) return;
+    var a = 0.18 * Math.abs(Math.sin(story.flicker * 42)) * (story.flicker / 0.55);
+    ctx.fillStyle = 'rgba(200, 240, 255, ' + a.toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // 屏幕上方单行文本：0.25s 淡入 / 1.6s 停留 / 0.55s 淡出
+  function drawStory() {
+    if (S.boss || S.mode === 'upgrade') return;   // Boss 战/强化界面让位
+    if (story.t < 0) return;
+    var a;
+    if (story.t < 0.25) a = story.t / 0.25;
+    else if (story.t < 1.85) a = 1;
+    else a = Math.max(0, (story.dur - story.t) / 0.55);
+    if (a <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = a * 0.55;
+    ctx.fillStyle = '#9EE7FF';
+    ctx.font = '400 13px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(story.text, W / 2, 108);
+    ctx.restore();
+  }
+
+  function render() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawBackground();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, W, H);
+    ctx.clip();
+    ctx.translate(W / 2 + S.shakeX, H / 2 + S.shakeY);
+    ctx.rotate(S.shakeRot);
+    if (S.mode === 'dead') {
+      var zoom = 1 + Math.min(S.deathT, 1.4) * 0.022;   // 缓慢推近
+      ctx.scale(zoom, zoom);
+    } else if (S.mode === 'intro') {
+      var iz = 1.08 - 0.08 * clamp(S.introT / 1.4, 0, 1);   // 从 1.08 拉回 1.0
+      ctx.scale(iz, iz);
+    }
+    ctx.translate(-W / 2, -H / 2);
+    drawWorld();
+    ctx.restore();
+    if (S.mode !== 'select' && S.mode !== 'intro') {
+      if (S.slow > 0) {
+        ctx.fillStyle = 'rgba(120, 80, 255, 0.06)';
+        ctx.fillRect(0, 0, W, H);
+      }
+      drawStoryFlicker();
+      drawHurt();
+      if (S.mode === 'reward') drawRewardTint();
+      if (S.wavePhase === 'warning') drawWaveWarning();
+      drawHUD();
+      drawVictoryFlash();
+      drawStory();
+      drawSysLog();
+      if (S.mode === 'playing') drawCrosshair();
+      drawFPS();
+      if (S.mode === 'upgrade') drawUpgrade();
+      drawOverlay();
+    }
+    if (S.mode === 'intro') drawIntro();
+    if (S.mode === 'select') drawSelect();
+    if (S.metaOpen) drawMeta();
+  }
+
+  // 部署过渡：黑场淡入 + 训练接入文案
+  function drawIntro() {
+    var t = S.introT, d = 1.4;
+    var fade = 1 - clamp(t / 0.45, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = 0.92 * fade;
+    ctx.fillStyle = '#03040a';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+    var a = Math.min(1, Math.max(0, (t - 0.25) / 0.35));
+    var out = Math.min(1, Math.max(0, (t - (d - 0.35)) / 0.35));
+    var al = a * (1 - out);
+    if (al <= 0) return;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = al * 0.9;
+    ctx.fillStyle = '#9EE7FF';
+    ctx.font = '800 26px ' + FONT;
+    ctx.fillText('训练接入', W / 2, H / 2 - 92);
+    ctx.globalAlpha = al * 0.55;
+    ctx.fillStyle = '#9fb8d8';
+    ctx.font = '400 13px ' + FONT;
+    ctx.fillText('学员编号 07 · 模拟核心就绪', W / 2, H / 2 - 54);
+    ctx.globalAlpha = al * 0.25;
+    ctx.fillStyle = '#9EE7FF';
+    ctx.fillRect(W / 2 - 120, H / 2 - 118, 240, 1);
+    ctx.restore();
+  }
+
+  // ===== 主循环 =====
+  var last = 0, fps = 60;
+
+  function frame(now) {
+    if (last === 0) last = now;
+    var dt = (now - last) / 1000;
+    last = now;
+    if (dt < 0) dt = 0;
+    if (dt > 0.05) dt = 0.05;
+    if (S.mode === 'playing') update(dt);
+    else if (S.mode === 'dead') updateDeath(dt);
+    else if (S.mode === 'intro') updateIntro(dt);
+    else if (S.mode === 'reward') updateReward(dt);
+    else if (S.mode === 'upgrade') updateUpgrade(dt);
+    else if (S.mode === 'select') S.selectT += dt;
+    if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
+    render();
+    syncCursor();
+    requestAnimationFrame(frame);
+  }
+
+  // ===== 输入 =====
+  window.addEventListener('keydown', function (e) {
+    var k = e.key.toLowerCase();
+    if (S.metaOpen) {
+      if (k === 'u' || k === 'escape') closeMeta();
+      return;
+    }
+    if (k === 'w' || k === 'arrowup') input.up = true;
+    else if (k === 's' || k === 'arrowdown') input.down = true;
+    else if (k === 'a' || k === 'arrowleft') input.left = true;
+    else if (k === 'd' || k === 'arrowright') input.right = true;
+    else if (k === 'r') {
+      if (S.mode === 'dead') returnToSelect();
+      else if (S.mode === 'playing' || S.mode === 'paused') {
+        reset(S.ship); sfx.start(); if (actx) startMusic();
+      }
+    } else if (k === '1' || k === '2' || k === '3') {
+      if (S.mode === 'select') selectShip(SHIP_ORDER[parseInt(k, 10) - 1]);
+      else if (S.mode === 'upgrade') chooseUpgrade(parseInt(k, 10) - 1);
+    } else if (k === 'u') {
+      if (S.mode === 'select' || S.mode === 'dead') openMeta();
+    } else if (k === 'p' || k === 'escape') {
+      if (S.mode === 'playing') { S.mode = 'paused'; duckMusic(true); }
+      else if (S.mode === 'paused') { S.mode = 'playing'; duckMusic(false); }
+    } else if (k === 'm') { toggleMute(); }
+    else if (k === 'f') { toggleFullscreen(); }
+    if (k === 'arrowup' || k === 'arrowdown' || k === 'arrowleft' || k === 'arrowright' || k === ' ') e.preventDefault();
+    if (S.mode !== 'dead') startMusic();
+  });
+
+  window.addEventListener('keyup', function (e) {
+    var k = e.key.toLowerCase();
+    if (k === 'w' || k === 'arrowup') input.up = false;
+    else if (k === 's' || k === 'arrowdown') input.down = false;
+    else if (k === 'a' || k === 'arrowleft') input.left = false;
+    else if (k === 'd' || k === 'arrowright') input.right = false;
+  });
+
+  canvas.addEventListener('mousemove', function (e) {
+    var r = canvas.getBoundingClientRect();
+    input.mx = (e.clientX - r.left) / r.width * W;
+    input.my = (e.clientY - r.top) / r.height * H;
+    if (S.metaOpen) {
+      var mhit = metaHit(input.mx, input.my);
+      var mrow = mhit && (mhit.type === 'row' || mhit.type === 'buy') ? mhit.index : -1;
+      if (mrow !== S.metaHover) {
+        S.metaHover = mrow;
+        if (mrow >= 0) sfx.uiHover();
+      }
+    } else if (S.mode === 'upgrade' && S.upgrade) {
+      var hi = upgradeHit(input.mx, input.my);
+      if (hi !== S.upgrade.hover) {
+        S.upgrade.hover = hi;
+        if (hi >= 0) sfx.uiHover();
+      }
+    } else if (S.mode === 'select') {
+      var mh = menuHit(input.mx, input.my);
+      if (mh !== menu.hover) {
+        menu.hover = mh;
+        if (mh >= 0) sfx.uiHover();
+      }
+    }
+  });
+
+  canvas.addEventListener('mousedown', function (e) {
+    if (e.button !== 0) return;
+    if (S.mode !== 'dead') startMusic();   // 任意点击解锁 AudioContext（自动播放策略）
+    if (S.metaOpen) {
+      var mrect = canvas.getBoundingClientRect();
+      var mmx = (e.clientX - mrect.left) / mrect.width * W;
+      var mmy = (e.clientY - mrect.top) / mrect.height * H;
+      var mh = metaHit(mmx, mmy);
+      if (mh && mh.type === 'close') { closeMeta(); return; }
+      if (mh && mh.type === 'buy') {
+        var md = META_DEFS[mh.index];
+        if (md && buyMeta(md.id)) sfx.upgradePick();
+        else sfx.uiHover();
+      }
+      return;
+    }
+    if (S.mode === 'upgrade') {
+      var urect = canvas.getBoundingClientRect();
+      var umx = (e.clientX - urect.left) / urect.width * W;
+      var umy = (e.clientY - urect.top) / urect.height * H;
+      var ui = upgradeHit(umx, umy);
+      if (ui >= 0) chooseUpgrade(ui);
+      return;
+    }
+    if (S.mode === 'select') {
+      var rect = canvas.getBoundingClientRect();
+      var mx = (e.clientX - rect.left) / rect.width * W;
+      var my = (e.clientY - rect.top) / rect.height * H;
+      var mi = menuHit(mx, my);
+      if (mi >= 0) { menuAction(mi); return; }
+      for (var i = 0; i < SHIP_ORDER.length; i++) {
+        var rc = cardRect(i);
+        if (mx >= rc.x && mx <= rc.x + rc.w && my >= rc.y && my <= rc.y + rc.h) {
+          selectShip(SHIP_ORDER[i]);
+          return;
+        }
+      }
+      return;
+    }
+    input.firing = true;
+  });
+
+  window.addEventListener('mouseup', function (e) {
+    if (e.button === 0) input.firing = false;
+  });
+
+  function pauseForBlur() {
+    input.up = input.down = input.left = input.right = false;
+    input.firing = false;
+    if (S.mode === 'playing') {
+      S.mode = 'paused';
+      duckMusic(true);
+      blurPaused = true;
+    }
+    if (!muted) {
+      muted = true;
+      applyMute();
+      blurMuted = true;
+    }
+  }
+
+  function resumeAfterBlur() {
+    if (blurMuted) {
+      muted = false;
+      applyMute();
+      blurMuted = false;
+    }
+    if (blurPaused && S.mode === 'paused') {
+      S.mode = 'playing';
+      duckMusic(false);
+      blurPaused = false;
+    }
+    if (!muted && actx && actx.state === 'suspended') {
+      try { actx.resume(); } catch (e) {}
+    }
+  }
+
+  window.addEventListener('blur', pauseForBlur);
+  window.addEventListener('focus', resumeAfterBlur);
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) pauseForBlur();
+    else resumeAfterBlur();
+  });
+
+  document.addEventListener('fullscreenchange', fit);
+
+  window.addEventListener('resize', fit);
+
+  // ===== 启动 =====
+  reset('striker', 'select');
+  fit();
+  requestAnimationFrame(frame);
+
+  // 调试 / 无头测试入口（原型允许保留）
+  window.__ARCADE__ = {
+    S: S, CFG: CFG, W: W, H: H, input: input,
+    reset: reset, update: update, updateDeath: updateDeath, updateIntro: updateIntro,
+    returnToSelect: returnToSelect, shoot: shoot, render: render,
+    menuRects: menuRects, menuHit: menuHit, menuAction: menuAction,
+    pauseForBlur: pauseForBlur, resumeAfterBlur: resumeAfterBlur,
+    syncCursor: syncCursor, isCursorHidden: function () { return cursorHidden; },
+    isMuted: function () { return muted; }, getBest: function () { return best; },
+    submitBest: submitBest, loadBest: loadBest, bestHash: bestHash,
+    meta: meta, META_DEFS: META_DEFS, metaCost: metaCost,
+    buyMeta: buyMeta, saveMeta: saveMeta,
+    openMeta: openMeta, closeMeta: closeMeta,
+    playerDpsEstimate: playerDpsEstimate,
+    spawnBoss: spawnBoss, damageBoss: damageBoss, fireBossRing: fireBossRing,
+    applyUpgrade: applyUpgrade, chooseUpgrade: chooseUpgrade, rollUpgrades: rollUpgrades,
+    updateUpgrade: updateUpgrade, updateReward: updateReward, UPGRADE_DEFS: UPGRADE_DEFS,
+    spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
+    selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
+    ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
+    fireInterval: fireInterval, pellets: pellets, damage: damage, spread: spread,
+    renderStats: renderStats,
+    story: story, STORY_LINES: STORY_LINES, showStory: showStory,
+    pools: { caps: POOL_CAP, stats: poolStats, free: pools },
+    grid: {
+      cell: GRID_CELL, margin: GRID_MARGIN, cols: GRID_W, rows: GRID_H, stats: gridStats,
+      build: gridBuild,
+      // 3×3 邻域查询（结果做精确半径过滤）；r 应 ≤ 64，才是完整候选集
+      query: function (x, y, r) {
+        gridBuild();
+        var out = [], cand = gridNear(x, y, []);
+        var rr = r === undefined ? 64 : r, r2 = rr * rr;
+        for (var i = 0; i < cand.length; i++) {
+          var e = cand[i], dx = e.x - x, dy = e.y - y;
+          if (dx * dx + dy * dy <= r2) out.push(e);
+        }
+        return out;
+      },
+      // 暴力查询（测试对照用）
+      brute: function (x, y, r) {
+        var out = [], rr = r === undefined ? 64 : r, r2 = rr * rr;
+        for (var i = 0; i < S.enemies.length; i++) {
+          var e = S.enemies[i], dx = e.x - x, dy = e.y - y;
+          if (dx * dx + dy * dy <= r2) out.push(e);
+        }
+        return out;
+      }
+    },
+    audio: {
+      ensure: ensureAudio,
+      start: startMusic,
+      stop: stopMusic,
+      isPlaying: function () { return music.on; },
+      tier: function () { return musicTier(S.combo); },
+      bossWanted: function () { return bossMusic.wanted; },
+      bossBpm: function () { return bossMusic.bpm; },
+      bossTargets: function () {
+        return {
+          drums: bossMusic.targets.drums, bass: bossMusic.targets.bass,
+          pad: bossMusic.targets.pad, siren: bossMusic.targets.siren
+        };
+      },
+      bossIntense: function () { return bossMusic.intense; },
+      targets: function () {
+        return {
+          drums: music.targets.drums, hats: music.targets.hats,
+          bass: music.targets.bass, lead: music.targets.lead
+        };
+      },
+      pitch: shootPitch,
+      bpm: function () { return BPM; }
+    }
+  };
+})();
+</script>
+</body>
+</html>
