@@ -79,11 +79,11 @@
                 dmg: 1.6, color: '#9feaff', pierce: true, homing: true, evolved: 'pulsar' }
     },
     evo: {
-      nova:     { name: '星爆', sub: '命中分裂 · 脉冲散射融合' },
-      prism:    { name: '棱镜', sub: '边界折射 · 散射棱镜' },
-      rift:     { name: '裂空', sub: '命中点爆炸 · 穿透弹道' },
-      judgment: { name: '审判', sub: '穿透弹幕 · 散射穿透融合' },
-      pulsar:   { name: '相位', sub: '自动追踪 · 脉冲穿透融合' }
+      nova:     { name: '星爆', sub: '命中分裂 · 脉冲散射融合', mats: ['pulse', 'pulse', 'spread', 'spread'] },
+      prism:    { name: '棱镜', sub: '边界折射 · 散射棱镜', mats: ['spread', 'spread', 'spread', 'spread'] },
+      rift:     { name: '裂空', sub: '命中点爆炸 · 穿透弹道', mats: ['laser', 'laser', 'laser', 'laser'] },
+      judgment: { name: '审判', sub: '穿透弹幕 · 散射穿透融合', mats: ['spread', 'spread', 'laser', 'laser'] },
+      pulsar:   { name: '相位', sub: '自动追踪 · 脉冲穿透融合', mats: ['pulse', 'pulse', 'laser', 'laser'] }
     },
 
     // 掉落权重（击杀随机掉落；每 15 杀保底一个）
@@ -227,7 +227,7 @@
     metaOpen: false, metaHover: -1, shardsEarned: 0,
     wingCount: 1, wingLevel: 1, wings: [],
     weaponPicks: null, evolved: null, evoForms: [], evolution: null, evoBanner: 0,
-    evoTier: 1, evoCharge: 0, evoBannerTitle: '', evoBannerSub: '',
+    evoTier: 1, evoMats: {}, lastBaseWeapon: 'pulse', evoBannerTitle: '', evoBannerSub: '',
     rewardT: 0, rewardDur: 0.3, rewardDrops: 0,
     sysLog: null,
     chainFx: [],
@@ -1328,7 +1328,8 @@
     S.metaOpen = false; S.metaHover = -1;
     S.weaponPicks = { pulse: 0, spread: 0, laser: 0 };
     S.evolved = null; S.evoForms = []; S.evolution = null; S.evoBanner = 0;
-    S.evoTier = 1; S.evoCharge = 0; S.evoBannerTitle = ''; S.evoBannerSub = '';
+    S.evoTier = 1; S.evoMats = {}; S.lastBaseWeapon = 'pulse';
+    S.evoBannerTitle = ''; S.evoBannerSub = '';
     input.firing = false;
     story.text = ''; story.t = -1; story.phase = -1;
     story.nextTrigger = 10; story.cooldown = 0; story.flicker = 0;
@@ -1639,22 +1640,12 @@
       if (!S.evoForms.length) {
         p.weapon = wid;
       } else if (!newEvo) {
-        // 已有进化形态：继续拾取 → 融合充能 → 进化等级
-        S.evoCharge += 1;
-        if (S.evoCharge >= 3) {
-          S.evoCharge = 0;
-          if (S.evoTier < 3) {
-            S.evoTier += 1;
-            setEvoBanner('EVOLUTION OVERDRIVE', 'Lv.' + S.evoTier + ' · 机制强化', 2.2);
-            S.victoryFlash = Math.max(S.victoryFlash, 0.32);
-            sfx.evolve();
-            label = 'EVO Lv.' + S.evoTier;
-          } else {
-            S.score += 80;
-            label = '进化武器 +80';
-          }
+        // 已有进化形态：拾取同配方素材 → 续挂一份限时融合素材
+        if (mountFusionMaterial(wid)) {
+          label = '素材补充';
         } else {
-          label = '融合充能 ' + S.evoCharge + '/3';
+          S.score += 40;
+          label = '+40 分';
         }
       }
     } else if (pk.type === 'coin') {
@@ -1701,10 +1692,29 @@
     S.evoBanner = dur || 2.4;
   }
 
+  function matTier(count) {
+    if (count >= 4) return 3;
+    if (count === 3) return 2;
+    return 1;
+  }
+
+  function makeFusionMats(id) {
+    var types = evoInfo(id).mats || ['pulse', 'pulse', 'spread', 'spread'];
+    var out = [];
+    for (var i = 0; i < 4; i++) {
+      var life = 20 - i * 2;
+      out.push({ type: types[i % types.length], life: life, max: life });
+    }
+    return out;
+  }
+
   function evolveWeapon(id) {
+    if (!S.evoForms.length) S.lastBaseWeapon = S.player.weapon;
     if (S.evoForms.indexOf(id) < 0) S.evoForms.push(id);
+    S.evoMats[id] = makeFusionMats(id);
     S.evolved = id;
     S.player.weapon = id;
+    S.evoTier = matTier(S.evoMats[id].length);
     S.mode = 'evolution';
     S.evolution = { t: 0, dur: 0.55, id: id };
     setEvoBanner('WEAPON EVOLUTION', evoInfo(id).sub, 2.8);
@@ -1719,18 +1729,91 @@
     sfx.evolve();
   }
 
+  function mountFusionMaterial(type) {
+    var ids = [S.evolved].concat(S.evoForms.filter(function (id) { return id !== S.evolved; }));
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i], types = evoInfo(id).mats || [], arr = S.evoMats[id];
+      if (!arr || types.indexOf(type) < 0) continue;
+      if (arr.length < 4) {
+        arr.push({ type: type, life: 12, max: 12 });
+      } else {
+        var idx = -1, low = Infinity;
+        for (var j = 0; j < arr.length; j++) {
+          if (arr[j].type === type && arr[j].life < low) { low = arr[j].life; idx = j; }
+        }
+        if (idx < 0) {
+          for (var k = 0; k < arr.length; k++) if (arr[k].life < low) { low = arr[k].life; idx = k; }
+        }
+        arr[idx].life = 12; arr[idx].max = 12;
+      }
+      if (id === S.evolved) S.evoTier = matTier(arr.length);
+      setEvoBanner('FUSION MOUNT', type.toUpperCase() + ' 素材 · ' + arr.length + '/4', 1.2);
+      S.victoryFlash = Math.max(S.victoryFlash, 0.12);
+      return true;
+    }
+    return false;
+  }
+
+  function collapseFusion() {
+    S.evolved = null;
+    S.evoForms = [];
+    S.evoMats = {};
+    S.evoTier = 1;
+    S.player.weapon = S.lastBaseWeapon || 'pulse';
+    S.fireCooldown = 0;
+    setEvoBanner('FUSION COLLAPSE', '素材耗尽 · 回到基础枪', 2.4);
+    S.victoryFlash = Math.max(S.victoryFlash, 0.3);
+    S.trauma = Math.min(1, S.trauma + 0.25);
+    sfx.formSwitch();
+  }
+
+  function updateFusion(dt) {
+    if (!S.evoForms.length) return;
+    var activeBefore = S.evolved;
+    var beforeCount = S.evoMats[activeBefore] ? S.evoMats[activeBefore].length : 0;
+    var i, j;
+    for (i = S.evoForms.length - 1; i >= 0; i--) {
+      var id = S.evoForms[i], arr = S.evoMats[id];
+      if (!arr) { S.evoForms.splice(i, 1); continue; }
+      for (j = arr.length - 1; j >= 0; j--) {
+        arr[j].life -= dt;
+        if (arr[j].life <= 0) arr.splice(j, 1);
+      }
+      if (!arr.length) {
+        delete S.evoMats[id];
+        S.evoForms.splice(i, 1);
+      }
+    }
+    if (!S.evoForms.length) { collapseFusion(); return; }
+    if (S.evoForms.indexOf(S.evolved) < 0) {
+      S.evolved = S.evoForms[0];
+      S.player.weapon = S.evolved;
+      S.evoTier = matTier(S.evoMats[S.evolved].length);
+      setEvoBanner('FUSION DECAY', '素材耗尽 · 自动切换 ' + evoInfo(S.evolved).name, 1.8);
+      S.victoryFlash = Math.max(S.victoryFlash, 0.2);
+      return;
+    }
+    var count = S.evoMats[S.evolved].length;
+    S.evoTier = matTier(count);
+    if (count < beforeCount) {
+      setEvoBanner('FUSION DECAY', count + '/4 · Lv.' + S.evoTier + ' · 素材过期', 1.6);
+      S.victoryFlash = Math.max(S.victoryFlash, 0.16);
+    }
+  }
+
   function switchEvoForm() {
     if (S.mode !== 'playing' || S.evoForms.length < 2) return;
     var idx = S.evoForms.indexOf(S.evolved);
     S.evolved = S.evoForms[(idx + 1) % S.evoForms.length];
     S.player.weapon = S.evolved;
+    S.evoTier = matTier(S.evoMats[S.evolved].length);
     S.fireCooldown = 0;
     setEvoBanner('FORM SWITCH', evoInfo(S.evolved).sub, 1.8);
     S.victoryFlash = Math.max(S.victoryFlash, 0.18);
     sfx.formSwitch();
   }
 
-  function evoInfo(id) { return CFG.evo[id] || { name: id, sub: '' }; }
+  function evoInfo(id) { return CFG.evo[id] || { name: id, sub: '', mats: [] }; }
 
   function updateEvolution(dt) {
     if (S.evolution) S.evolution.t += dt;
@@ -2352,6 +2435,7 @@
     S.fireCooldown -= dt;
     if (input.firing && S.fireCooldown <= 0) shoot();
     updateWings(dt);
+    updateFusion(dt);
     if (S.muzzle > 0) S.muzzle = Math.max(0, S.muzzle - dt);
 
     // 空间哈希：本帧子弹碰撞使用敌人当前坐标（网格覆盖屏幕外生成点）。
@@ -3120,14 +3204,36 @@
 
     ctx.font = '600 12px ' + FONT;
     ctx.fillStyle = S.evolved ? '#ffd45e' : '#8fb8ff';
+    var matCount = S.evolved && S.evoMats[S.evolved] ? S.evoMats[S.evolved].length : 0;
     ctx.fillText(
-      'WPN ' + w.name + (S.evolved ? ' · EVO Lv.' + S.evoTier : '') +
-      (S.evolved && S.evoCharge > 0 ? ' (' + S.evoCharge + '/3)' : '') +
+      'WPN ' + w.name + (S.evolved ? ' · EVO Lv.' + S.evoTier + ' · 素材 ' + matCount + '/4' : '') +
       (S.evoForms.length > 1 ? ' · Q切换' : '') +
       ' · ' + (1 / fireInterval()).toFixed(1) + ' 发/s · ' +
       pellets() + ' 弹 · 伤害 ' + damage().toFixed(1),
       cx, H - 46
     );
+
+    // 融合素材：4 个限时槽位
+    if (S.evolved) {
+      var mats = S.evoMats[S.evolved] || [];
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(150, 180, 230, 0.55)';
+      ctx.font = '600 10px ' + FONT;
+      ctx.fillText('FUSION ' + mats.length + '/4', W - 276, H - 82);
+      for (var fm = 0; fm < 4; fm++) {
+        var mt = mats[fm];
+        var mx = W - 276 + fm * 62, my = H - 72;
+        ctx.fillStyle = mt ? CFG.weapons[mt.type].color : 'rgba(120, 150, 200, 0.16)';
+        ctx.font = '700 10px ' + FONT;
+        ctx.fillText(mt ? CFG.weapons[mt.type].name.charAt(0) : '·', mx, my);
+        ctx.fillStyle = 'rgba(120, 150, 200, 0.22)';
+        ctx.fillRect(mx, my + 6, 48, 4);
+        if (mt) {
+          ctx.fillStyle = CFG.weapons[mt.type].color;
+          ctx.fillRect(mx, my + 6, 48 * Math.max(0, mt.life / mt.max), 4);
+        }
+      }
+    }
     ctx.fillStyle = '#7fe8ff';
     ctx.font = '600 11px ' + FONT;
     ctx.fillText('WING \u00d7' + S.wingCount + ' \u00b7 Lv.' + S.wingLevel, cx, H - 30);
@@ -3969,7 +4075,7 @@
     spawnBoss: spawnBoss, damageBoss: damageBoss, fireBossRing: fireBossRing,
     applyUpgrade: applyUpgrade, chooseUpgrade: chooseUpgrade, rollUpgrades: rollUpgrades,
     updateUpgrade: updateUpgrade, updateReward: updateReward, updateEvolution: updateEvolution,
-    switchEvoForm: switchEvoForm, UPGRADE_DEFS: UPGRADE_DEFS,
+    switchEvoForm: switchEvoForm, updateFusion: updateFusion, UPGRADE_DEFS: UPGRADE_DEFS,
     spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
     selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
     ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
