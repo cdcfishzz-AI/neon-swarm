@@ -226,7 +226,8 @@
     upgrades: null,
     metaOpen: false, metaHover: -1, shardsEarned: 0,
     wingCount: 1, wingLevel: 1, wings: [],
-    weaponPicks: null, evolved: null, evolution: null, evoBanner: 0,
+    weaponPicks: null, evolved: null, evoForms: [], evolution: null, evoBanner: 0,
+    evoTier: 1, evoCharge: 0, evoBannerTitle: '', evoBannerSub: '',
     rewardT: 0, rewardDur: 0.3, rewardDrops: 0,
     sysLog: null,
     chainFx: [],
@@ -750,6 +751,13 @@
       tone('sawtooth', 260, 80, 0.16, 0.05);
       noiseBurst(0.12, 0.06, 1600);
     },
+    formSwitch: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 660, 990, 0.12, 0.05, t);
+      tone('sine', 990, 1480, 0.16, 0.04, t + 0.08);
+      noiseBurstTo(master, t, 0.1, 0.025, 6000);
+    },
     wingLevel: function () {
       var ac = ensureAudio(); if (!ac) return;
       var t = ac.currentTime;
@@ -1242,6 +1250,9 @@
   function pellets() {
     var w = weapon();
     var base = w.pellets ? w.pellets : (S.combo >= CFG.fire.pellets3 ? 3 : S.combo >= CFG.fire.pellets2 ? 2 : 1);
+    if (w.evolved === 'prism' || w.evolved === 'judgment' || w.evolved === 'pulsar') {
+      base += (S.evoTier - 1);
+    }
     return base + (S.upgrades ? S.upgrades.shots : 0);
   }
   function damage() {
@@ -1316,7 +1327,8 @@
     S.shardsEarned = 0;
     S.metaOpen = false; S.metaHover = -1;
     S.weaponPicks = { pulse: 0, spread: 0, laser: 0 };
-    S.evolved = null; S.evolution = null; S.evoBanner = 0;
+    S.evolved = null; S.evoForms = []; S.evolution = null; S.evoBanner = 0;
+    S.evoTier = 1; S.evoCharge = 0; S.evoBannerTitle = ''; S.evoBannerSub = '';
     input.firing = false;
     story.text = ''; story.t = -1; story.phase = -1;
     story.nextTrigger = 10; story.cooldown = 0; story.flicker = 0;
@@ -1426,7 +1438,7 @@
   }
 
   function steerBullet(b, dt) {
-    var best = null, bd = 240 * 240, i;
+    var best = null, range = 180 + 60 * S.evoTier, bd = range * range, i;
     if (S.boss && S.boss.state === 'active') {
       var bx = S.boss.x - b.x, by = S.boss.y - b.y, bdd = bx * bx + by * by;
       if (bdd < bd) { bd = bdd; best = S.boss; }
@@ -1441,7 +1453,8 @@
     var targetA = Math.atan2(best.y - b.y, best.x - b.x);
     var curA = Math.atan2(b.vy, b.vx);
     var diff = Math.atan2(Math.sin(targetA - curA), Math.cos(targetA - curA));
-    var turn = clamp(diff, -3.2 * dt, 3.2 * dt);
+    var rate = (2.4 + 0.8 * S.evoTier) * dt;
+    var turn = clamp(diff, -rate, rate);
     var na = curA + turn, sp = Math.hypot(b.vx, b.vy);
     b.vx = Math.cos(na) * sp;
     b.vy = Math.sin(na) * sp;
@@ -1449,12 +1462,14 @@
 
   function spawnSplit(b) {
     var a = Math.atan2(b.vy, b.vx), sp = Math.hypot(b.vx, b.vy) * 0.85;
-    for (var k = -1; k <= 1; k += 2) {
+    var count = 2 + (S.evoTier - 1);
+    for (var k = 0; k < count; k++) {
+      var off = (k - (count - 1) / 2) * 0.42;
       var nb = poolTake('bullets', S.bullets);
       nb.x = b.x; nb.y = b.y;
-      nb.vx = Math.cos(a + k * 0.5) * sp;
-      nb.vy = Math.sin(a + k * 0.5) * sp;
-      nb.life = 1.1; nb.dmg = b.dmg * 0.55; nb.r = 2;
+      nb.vx = Math.cos(a + off) * sp;
+      nb.vy = Math.sin(a + off) * sp;
+      nb.life = 1.1; nb.dmg = b.dmg * (0.45 + 0.1 * S.evoTier); nb.r = 2;
       nb.pierce = false; nb.bossHit = false;
       nb.child = true; nb.splitDone = true; nb.exploded = false;
       nb.bounce = 0; nb.homing = false;
@@ -1465,19 +1480,19 @@
   }
 
   function riftExplode(x, y, dmg, source) {
-    var es = S.enemies, i;
+    var es = S.enemies, i, radius = 60 + 16 * S.evoTier;
     for (i = 0; i < es.length; i++) {
       var e = es[i];
       if (e === source || e.hp <= 0) continue;
       var dx = e.x - x, dy = e.y - y;
-      if (dx * dx + dy * dy > 76 * 76) continue;
+      if (dx * dx + dy * dy > radius * radius) continue;
       e.hp -= dmg;
       e.flash = 0.09;
       sparkBurst(e.x, e.y, 5, '#c9a2ff');
       if (e.hp <= 0) killEnemy(e);
     }
     var rg = poolTake('rings', S.rings);
-    rg.x = x; rg.y = y; rg.r = 8; rg.r1 = 82;
+    rg.x = x; rg.y = y; rg.r = 8; rg.r1 = radius + 6;
     rg.life = 0.32; rg.max = 0.32; rg.color = '#c9a2ff';
     S.trauma = Math.min(1, S.trauma + 0.06);
     sfx.rift();
@@ -1570,7 +1585,8 @@
       b.pierce = !!w.pierce || !!(S.upgrades && S.upgrades.pierce);
       b.bossHit = false;
       b.child = false; b.splitDone = false; b.exploded = false;
-      b.bounce = w.bounce || 0; b.homing = !!w.homing;
+      b.bounce = w.bounce ? w.bounce + (S.evoTier - 1) : 0;
+      b.homing = !!w.homing;
       if (b.hits) b.hits.length = 0; else b.hits = [];
       b.color = w.color;
     }
@@ -1617,14 +1633,29 @@
       label = '时缓 4.5s';
     } else if (pk.type === 'w_pulse' || pk.type === 'w_spread' || pk.type === 'w_laser') {
       var wid = pk.type === 'w_spread' ? 'spread' : (pk.type === 'w_laser' ? 'laser' : 'pulse');
-      if (S.evolved) {
-        S.score += 60;
-        label = '进化武器 +60';
-      } else {
+      S.weaponPicks[wid] = (S.weaponPicks[wid] || 0) + 1;
+      label = CFG.weapons[wid].name;
+      var newEvo = checkWeaponEvolution();
+      if (!S.evoForms.length) {
         p.weapon = wid;
-        S.weaponPicks[wid] = (S.weaponPicks[wid] || 0) + 1;
-        label = CFG.weapons[wid].name;
-        checkWeaponEvolution();
+      } else if (!newEvo) {
+        // 已有进化形态：继续拾取 → 融合充能 → 进化等级
+        S.evoCharge += 1;
+        if (S.evoCharge >= 3) {
+          S.evoCharge = 0;
+          if (S.evoTier < 3) {
+            S.evoTier += 1;
+            setEvoBanner('EVOLUTION OVERDRIVE', 'Lv.' + S.evoTier + ' · 机制强化', 2.2);
+            S.victoryFlash = Math.max(S.victoryFlash, 0.32);
+            sfx.evolve();
+            label = 'EVO Lv.' + S.evoTier;
+          } else {
+            S.score += 80;
+            label = '进化武器 +80';
+          }
+        } else {
+          label = '融合充能 ' + S.evoCharge + '/3';
+        }
       }
     } else if (pk.type === 'coin') {
       S.score += 40;
@@ -1641,27 +1672,42 @@
   }
 
   // ===== 武器融合进化：PULSE/SCATTER → 星爆；LANCE(+穿透) → 裂空 =====
-  function checkWeaponEvolution() {
-    if (S.evolved) return;
+  function nextEvolutionFor() {
     var q = S.weaponPicks, pulse = q.pulse || 0, spread = q.spread || 0, laser = q.laser || 0;
+    function has(id) { return S.evoForms.indexOf(id) >= 0; }
     // 星爆：脉冲主导（脉冲×2，或 PULSE × SCATTER）
-    if (pulse >= 2 || (pulse >= 1 && spread >= 1)) { evolveWeapon('nova'); return; }
+    if (!has('nova') && (pulse >= 2 || (pulse >= 1 && spread >= 1))) return 'nova';
     // 棱镜：纯散射×2，边界折射
-    if (spread >= 2) { evolveWeapon('prism'); return; }
+    if (!has('prism') && spread >= 2) return 'prism';
     // 裂空：穿透体系（LANCE×2，或 LANCE × 贯穿协议）
-    if (laser >= 2 || (laser >= 1 && S.upgrades.pierce)) { evolveWeapon('rift'); return; }
+    if (!has('rift') && (laser >= 2 || (laser >= 1 && S.upgrades.pierce))) return 'rift';
     // 审判：散射 × 穿透，穿透弹幕
-    if (laser >= 1 && spread >= 1) { evolveWeapon('judgment'); return; }
+    if (!has('judgment') && laser >= 1 && spread >= 1) return 'judgment';
     // 相位：脉冲 × 穿透，自动追踪
-    if (laser >= 1 && pulse >= 1) { evolveWeapon('pulsar'); }
+    if (!has('pulsar') && laser >= 1 && pulse >= 1) return 'pulsar';
+    return null;
+  }
+
+  function checkWeaponEvolution() {
+    var id = nextEvolutionFor();
+    if (!id) return null;
+    evolveWeapon(id);
+    return id;
+  }
+
+  function setEvoBanner(title, sub, dur) {
+    S.evoBannerTitle = title;
+    S.evoBannerSub = sub;
+    S.evoBanner = dur || 2.4;
   }
 
   function evolveWeapon(id) {
+    if (S.evoForms.indexOf(id) < 0) S.evoForms.push(id);
     S.evolved = id;
     S.player.weapon = id;
     S.mode = 'evolution';
     S.evolution = { t: 0, dur: 0.55, id: id };
-    S.evoBanner = 2.8;
+    setEvoBanner('WEAPON EVOLUTION', evoInfo(id).sub, 2.8);
     S.fireCooldown = 0;
     input.firing = false;
     S.victoryFlash = 0.5;
@@ -1671,6 +1717,17 @@
     rg.x = S.player.x; rg.y = S.player.y; rg.r = 12; rg.r1 = 150;
     rg.life = 0.6; rg.max = 0.6; rg.color = id === 'nova' ? '#ffd45e' : '#c9a2ff';
     sfx.evolve();
+  }
+
+  function switchEvoForm() {
+    if (S.mode !== 'playing' || S.evoForms.length < 2) return;
+    var idx = S.evoForms.indexOf(S.evolved);
+    S.evolved = S.evoForms[(idx + 1) % S.evoForms.length];
+    S.player.weapon = S.evolved;
+    S.fireCooldown = 0;
+    setEvoBanner('FORM SWITCH', evoInfo(S.evolved).sub, 1.8);
+    S.victoryFlash = Math.max(S.victoryFlash, 0.18);
+    sfx.formSwitch();
   }
 
   function evoInfo(id) { return CFG.evo[id] || { name: id, sub: '' }; }
@@ -2369,7 +2426,7 @@
       }
       if (S.evolved === 'rift' && !b.exploded) {
         b.exploded = true;
-        riftExplode(b.x, b.y, b.dmg * 0.55, hitE);
+        riftExplode(b.x, b.y, b.dmg * (0.45 + 0.1 * S.evoTier), hitE);
       }
       if (b.pierce) { b.hits.push(enemyUid(hitE)); } else { poolGive('bullets', S.bullets, i); }
       if (hitE.hp <= 0) killEnemy(hitE);
@@ -2995,13 +3052,13 @@
     if (S.evoBanner > 0) {
       var ea = clamp(S.evoBanner / 2.8, 0, 1);
       var evoName = evoInfo(S.evolved).name;
-      var evoSub = evoInfo(S.evolved).sub;
+      var evoSub = S.evoBannerSub || evoInfo(S.evolved).sub;
       ctx.save();
       ctx.globalAlpha = ea * 0.9;
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ffd45e';
       ctx.font = '600 12px ' + FONT;
-      ctx.fillText('WEAPON EVOLUTION', W / 2, H / 2 - 168);
+      ctx.fillText(S.evoBannerTitle || 'WEAPON EVOLUTION', W / 2, H / 2 - 168);
       ctx.font = '800 34px ' + FONT;
       ctx.shadowColor = '#ffd45e';
       ctx.shadowBlur = 22;
@@ -3064,7 +3121,10 @@
     ctx.font = '600 12px ' + FONT;
     ctx.fillStyle = S.evolved ? '#ffd45e' : '#8fb8ff';
     ctx.fillText(
-      'WPN ' + w.name + (S.evolved ? ' · EVO' : '') + ' · ' + (1 / fireInterval()).toFixed(1) + ' 发/s · ' +
+      'WPN ' + w.name + (S.evolved ? ' · EVO Lv.' + S.evoTier : '') +
+      (S.evolved && S.evoCharge > 0 ? ' (' + S.evoCharge + '/3)' : '') +
+      (S.evoForms.length > 1 ? ' · Q切换' : '') +
+      ' · ' + (1 / fireInterval()).toFixed(1) + ' 发/s · ' +
       pellets() + ' 弹 · 伤害 ' + damage().toFixed(1),
       cx, H - 46
     );
@@ -3095,7 +3155,7 @@
     }
     ctx.font = '500 12px ' + FONT;
     ctx.fillStyle = 'rgba(140, 170, 220, 0.5)';
-    ctx.fillText('WASD 移动 · 鼠标瞄准 · 按住左键开火 · R 重开 · P 暂停 · M 静音', W / 2, H - 16);
+    ctx.fillText('WASD 移动 · 鼠标瞄准 · 按住左键开火 · Q 切换形态 · R 重开 · P 暂停 · M 静音', W / 2, H - 16);
   }
 
   function drawHurt() {
@@ -3751,6 +3811,8 @@
     } else if (k === '1' || k === '2' || k === '3') {
       if (S.mode === 'select') selectShip(SHIP_ORDER[parseInt(k, 10) - 1]);
       else if (S.mode === 'upgrade') chooseUpgrade(parseInt(k, 10) - 1);
+    } else if (k === 'q') {
+      switchEvoForm();
     } else if (k === 'u') {
       if (S.mode === 'select' || S.mode === 'dead') openMeta();
     } else if (k === 'p' || k === 'escape') {
@@ -3907,7 +3969,7 @@
     spawnBoss: spawnBoss, damageBoss: damageBoss, fireBossRing: fireBossRing,
     applyUpgrade: applyUpgrade, chooseUpgrade: chooseUpgrade, rollUpgrades: rollUpgrades,
     updateUpgrade: updateUpgrade, updateReward: updateReward, updateEvolution: updateEvolution,
-    UPGRADE_DEFS: UPGRADE_DEFS,
+    switchEvoForm: switchEvoForm, UPGRADE_DEFS: UPGRADE_DEFS,
     spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
     selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
     ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
