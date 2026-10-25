@@ -113,7 +113,12 @@
     affixes: {
       swift:  { name: '迅捷', color: '#ffe27a', desc: '速度 +50% · HP −30%' },
       split:  { name: '分裂', color: '#c9a2ff', desc: '死亡分裂 2 个 40% HP 小怪' },
-      magnet: { name: '磁暴', color: '#5ee8ff', desc: '死亡留下 0.3s 减速场' }
+      magnet: { name: '磁暴', color: '#5ee8ff', desc: '死亡留下 0.3s 减速场' },
+      volatile: { name: '爆裂', color: '#ff8a5c', desc: '死亡 0.5s 后爆炸' },
+      armored: { name: '装甲', color: '#c7d7ff', desc: 'HP +40% · 速度 −15%' },
+      phase: { name: '相位', color: '#b6ff6a', desc: '每 3s 短距离闪烁' },
+      parasitic: { name: '寄生', color: '#6dffb0', desc: '死亡治疗/加速附近敌人' },
+      tractor: { name: '牵引', color: '#ff6ad5', desc: '260px 内拉扯玩家' }
     },
 
     // 波次 + Boss：60s 一波，50s 起警告，60s 小怪聚合出 Boss；Boss HP 线性增长（+250/波）
@@ -238,6 +243,7 @@
     introT: 0, selectT: 1,
     wave: 1, waveT: 0, wavePhase: 'normal', warnTick: 0,
     waveAffixes: [], affixCursor: 0, fields: [],
+    affixBlasts: [], affixGhosts: [], affixLinks: [],
     waveBanner: 0, waveBannerText: '',
     victoryFlash: 0,
     upgrade: null,
@@ -401,6 +407,7 @@
     } else if (kind === 'enemies') {
       o.x = 0; o.y = 0; o.r = 0; o.hp = 0; o.maxHp = 0; o.spd = 0; o.phase = 0;
       o.flash = 0; o.affix = null; o.affixT = 0; o.splitDepth = 0;
+      o.blinkT = 0; o.buffT = 0; o.buffSpd = 1;
       o.__uid = undefined; o.__idx = -1;
     } else if (kind === 'sparks') {
       o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.max = 0; o.size = 0; o.color = '';
@@ -777,6 +784,16 @@
       tone('sine', 660, 990, 0.12, 0.05, t);
       tone('sine', 990, 1480, 0.16, 0.04, t + 0.08);
       noiseBurstTo(master, t, 0.1, 0.025, 6000);
+    },
+    affixBlast: function () {
+      tone('sawtooth', 180, 55, 0.28, 0.09);
+      noiseBurst(0.18, 0.08, 1200);
+    },
+    phase: function () {
+      var ac = ensureAudio(); if (!ac) return;
+      var t = ac.currentTime;
+      tone('sine', 1400, 2200, 0.08, 0.03, t);
+      noiseBurstTo(master, t, 0.08, 0.02, 7000);
     },
     wingLevel: function () {
       var ac = ensureAudio(); if (!ac) return;
@@ -1322,6 +1339,7 @@
     poolReleaseAll('pickups', S.pickups); poolReleaseAll('ebullets', S.ebullets);
     S.wave = 1; S.waveT = 0; S.wavePhase = 'normal'; S.warnTick = 0;
     S.waveAffixes = []; S.affixCursor = 0; S.fields.length = 0;
+    S.affixBlasts.length = 0; S.affixGhosts.length = 0; S.affixLinks.length = 0;
     S.waveBanner = 0; S.waveBannerText = ''; S.boss = null;
     S.victoryFlash = 0;
     S.upgrade = null;
@@ -1415,11 +1433,13 @@
       S.affixCursor += 1;
     }
     if (affix === 'swift') { hp = Math.max(1, Math.round(hp * 0.7)); spd *= 1.5; }
+    if (affix === 'armored') { hp = Math.max(1, Math.round(hp * 1.4)); spd *= 0.85; }
     var e = poolTake('enemies', S.enemies);
     e.x = x; e.y = y; e.r = CFG.enemy.r; e.hp = hp; e.maxHp = hp;
     e.spd = spd;
     e.phase = rnd() * TAU; e.flash = 0;
     e.affix = affix; e.affixT = 0; e.splitDepth = 0;
+    e.blinkT = 1.6 + rnd() * 1.6; e.buffT = 0; e.buffSpd = 1;
     e.__uid = ++enemyUidSeq; e.__idx = -1;
     if (affix) sparkBurst(x, y, 7, CFG.affixes[affix].color);
   }
@@ -1438,6 +1458,7 @@
       c.spd = e.spd * 1.15;
       c.phase = rnd() * TAU; c.flash = 0;
       c.affix = null; c.affixT = 0; c.splitDepth = 1;
+      c.blinkT = 0; c.buffT = 0; c.buffSpd = 1;
       c.__uid = ++enemyUidSeq; c.__idx = -1;
     }
     sparkBurst(e.x, e.y, 12, '#c9a2ff');
@@ -1459,6 +1480,59 @@
     for (var i = S.fields.length - 1; i >= 0; i--) {
       S.fields[i].life -= dt;
       if (S.fields[i].life <= 0) S.fields.splice(i, 1);
+    }
+  }
+
+  function spawnAffixBlast(x, y) {
+    if (S.affixBlasts.length >= 20) S.affixBlasts.shift();
+    S.affixBlasts.push({ x: x, y: y, r: 74, life: 0.5, max: 0.5 });
+  }
+
+  function parasitePulse(e) {
+    var count = 0;
+    for (var i = 0; i < S.enemies.length && count < 3; i++) {
+      var other = S.enemies[i];
+      if (other === e || other.hp <= 0) continue;
+      var dx = other.x - e.x, dy = other.y - e.y;
+      if (dx * dx + dy * dy > 180 * 180) continue;
+      other.hp = Math.min(other.maxHp, other.hp + 1);
+      other.buffT = 2;
+      other.buffSpd = 1.3;
+      if (S.affixLinks.length >= 24) S.affixLinks.shift();
+      S.affixLinks.push({
+        x1: e.x, y1: e.y, x2: other.x, y2: other.y,
+        life: 0.4, max: 0.4
+      });
+      count++;
+    }
+    sparkBurst(e.x, e.y, 12, '#6dffb0');
+    var rg = poolTake('rings', S.rings);
+    rg.x = e.x; rg.y = e.y; rg.r = 8; rg.r1 = 82;
+    rg.life = 0.35; rg.max = 0.35; rg.color = '#6dffb0';
+  }
+
+  function updateAffixEffects(dt) {
+    for (var i = S.affixBlasts.length - 1; i >= 0; i--) {
+      var b = S.affixBlasts[i];
+      b.life -= dt;
+      if (b.life <= 0) {
+        var p = S.player;
+        sparkBurst(b.x, b.y, 18, '#ff8a5c');
+        var rg = poolTake('rings', S.rings);
+        rg.x = b.x; rg.y = b.y; rg.r = 8; rg.r1 = b.r + 12;
+        rg.life = 0.35; rg.max = 0.35; rg.color = '#ff8a5c';
+        if (Math.hypot(p.x - b.x, p.y - b.y) < b.r + p.r) hurtPlayer(b);
+        sfx.affixBlast();
+        S.affixBlasts.splice(i, 1);
+      }
+    }
+    for (var g = S.affixGhosts.length - 1; g >= 0; g--) {
+      S.affixGhosts[g].life -= dt;
+      if (S.affixGhosts[g].life <= 0) S.affixGhosts.splice(g, 1);
+    }
+    for (var l = S.affixLinks.length - 1; l >= 0; l--) {
+      S.affixLinks[l].life -= dt;
+      if (S.affixLinks[l].life <= 0) S.affixLinks.splice(l, 1);
     }
   }
 
@@ -1492,6 +1566,8 @@
     rg.life = CFG.fx.ringLife; rg.max = CFG.fx.ringLife; rg.color = COL.ring;
     if (e.affix === 'split') spawnSplitChildren(e);
     if (e.affix === 'magnet') spawnAffixField(e.x, e.y);
+    if (e.affix === 'volatile') spawnAffixBlast(e.x, e.y);
+    if (e.affix === 'parasitic') parasitePulse(e);
     if (e.affix) sparkBurst(e.x, e.y, 7, CFG.affixes[e.affix].color);
     if (!award) { sparkBurst(e.x, e.y, 6, COL.chunk); return; }
     S.trauma = Math.min(1, S.trauma + CFG.shake.kill);
@@ -2380,6 +2456,7 @@
     S.waveAffixes = [];
     S.affixCursor = 0;
     S.fields.length = 0;
+    S.affixBlasts.length = 0; S.affixGhosts.length = 0; S.affixLinks.length = 0;
     var floorHp = CFG.wave.bossBaseHp + CFG.wave.bossHpPerWave * (S.wave - 1);
     var hp = Math.max(floorHp, Math.round(playerDpsEstimate() * CFG.wave.bossTtk));
     S.boss = {
@@ -2560,6 +2637,7 @@
     S.time += dt; S.elapsed += dt;
     updateWave(dt);
     updateAffixFields(dt);
+    updateAffixEffects(dt);
     var p = S.player, i, j;
 
     if (p.inv > 0) p.inv = Math.max(0, p.inv - dt);
@@ -2679,11 +2757,32 @@
     var spdF = S.slow > 0 ? 0.45 : 1;
     for (i = S.enemies.length - 1; i >= 0; i--) {
       var en = S.enemies[i];
+      if (en.buffT > 0) en.buffT = Math.max(0, en.buffT - dt);
+      if (en.affix === 'phase') {
+        en.blinkT -= dt;
+        if (en.blinkT <= 0) {
+          en.blinkT = 2.4 + rnd() * 0.8;
+          var oldX = en.x, oldY = en.y;
+          var ba = Math.atan2(p.y - en.y, p.x - en.x) + (rnd() - 0.5) * 1.6;
+          var bd = 55 + rnd() * 45;
+          en.x = clamp(en.x + Math.cos(ba) * bd, 20, W - 20);
+          en.y = clamp(en.y + Math.sin(ba) * bd, 20, H - 20);
+          if (S.affixGhosts.length >= 24) S.affixGhosts.shift();
+          S.affixGhosts.push({ x: oldX, y: oldY, r: en.r, life: 0.4, max: 0.4, color: CFG.affixes.phase.color });
+          sparkBurst(en.x, en.y, 6, CFG.affixes.phase.color);
+          sfx.phase();
+        }
+      }
       var ex = p.x - en.x, ey = p.y - en.y;
       var edist = Math.hypot(ex, ey) || 1;
+      if (en.affix === 'tractor' && edist < 260) {
+        p.x = clamp(p.x + (en.x - p.x) / edist * 60 * dt, p.r, W - p.r);
+        p.y = clamp(p.y + (en.y - p.y) / edist * 60 * dt, p.r, H - p.r);
+      }
+      var enSpd = en.spd * (en.buffT > 0 ? en.buffSpd : 1);
       var wob = Math.sin(S.time * 3 + en.phase) * 34 * spdF;
-      en.x += (ex / edist * en.spd * spdF + (-ey / edist) * wob) * dt;
-      en.y += (ey / edist * en.spd * spdF + (ex / edist) * wob) * dt;
+      en.x += (ex / edist * enSpd * spdF + (-ey / edist) * wob) * dt;
+      en.y += (ey / edist * enSpd * spdF + (ex / edist) * wob) * dt;
       if (en.flash > 0) en.flash = Math.max(0, en.flash - dt);
       // 接触
       var cd = Math.hypot(p.x - en.x, p.y - en.y);
@@ -3020,6 +3119,56 @@
     }
   }
 
+  function drawAffixEffects() {
+    var i, b, g, l;
+    for (i = 0; i < S.affixGhosts.length; i++) {
+      g = S.affixGhosts[i];
+      var ga = clamp(g.life / g.max, 0, 1);
+      ctx.save();
+      ctx.translate(g.x, g.y);
+      ctx.rotate(S.time * 2 + i);
+      ctx.globalAlpha = ga * 0.45;
+      ctx.strokeStyle = g.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, -g.r); ctx.lineTo(g.r * 0.86, 0);
+      ctx.lineTo(0, g.r); ctx.lineTo(-g.r * 0.86, 0);
+      ctx.closePath(); ctx.stroke();
+      ctx.restore();
+    }
+    for (i = 0; i < S.affixLinks.length; i++) {
+      l = S.affixLinks[i];
+      var la = clamp(l.life / l.max, 0, 1);
+      ctx.save();
+      ctx.globalAlpha = la * 0.55;
+      ctx.strokeStyle = '#6dffb0';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(l.x1, l.y1);
+      ctx.lineTo(l.x2, l.y2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (i = 0; i < S.affixBlasts.length; i++) {
+      b = S.affixBlasts[i];
+      var bt = 1 - clamp(b.life / b.max, 0, 1);
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.globalAlpha = 0.55 + bt * 0.35;
+      ctx.fillStyle = 'rgba(255, 138, 92, ' + (0.06 + bt * 0.16) + ')';
+      ctx.beginPath(); ctx.arc(0, 0, b.r * (0.35 + bt * 0.65), 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#ff8a5c';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, b.r, 0, TAU); ctx.stroke();
+      ctx.strokeStyle = '#ffd2a8';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(0, 0, b.r * (0.35 + bt * 0.65), -Math.PI / 2, -Math.PI / 2 + TAU * bt);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   function drawWorld() {
     var i, t, p = S.player;
     renderStats.drawn = 0;
@@ -3088,6 +3237,7 @@
     ctx.globalCompositeOperation = 'source-over';
 
     drawAffixFields();
+    drawAffixEffects();
 
     // 敌人
     for (i = 0; i < S.enemies.length; i++) {
@@ -3114,10 +3264,22 @@
         }
         ctx.restore();
       }
+      if (e.affix === 'tractor') {
+        var tdx = S.player.x - e.x, tdy = S.player.y - e.y, tdd = Math.hypot(tdx, tdy);
+        if (tdd < 260) {
+          ctx.save();
+          ctx.globalAlpha = 0.25 + 0.2 * Math.abs(Math.sin(S.time * 9 + e.phase));
+          ctx.strokeStyle = ac;
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(tdx, tdy); ctx.stroke();
+          ctx.restore();
+        }
+      }
       ctx.rotate(S.time * 2 + e.phase);
       ctx.shadowColor = ac || COL.enemy;
       ctx.shadowBlur = ac ? 14 : 8;
       ctx.fillStyle = e.flash > 0 ? '#ffffff' : (ac || COL.enemy);
+      if (e.affix === 'phase') ctx.globalAlpha = 0.65 + 0.35 * Math.abs(Math.sin(S.time * 8 + e.phase));
       ctx.beginPath();
       ctx.moveTo(0, -e.r);
       ctx.lineTo(e.r * 0.86, 0);
@@ -3125,6 +3287,7 @@
       ctx.lineTo(-e.r * 0.86, 0);
       ctx.closePath();
       ctx.fill();
+      ctx.globalAlpha = 1;
       // 分裂：两颗环绕的紫色碎片
       if (e.affix === 'split') {
         ctx.shadowBlur = 8;
@@ -3150,6 +3313,48 @@
           ctx.stroke();
         }
       }
+      // 装甲：银色护盾弧
+      if (e.affix === 'armored') {
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#e8f0ff';
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.75;
+        ctx.beginPath();
+        ctx.arc(0, 0, e.r + 6, -2.25, 0.65);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0, 0, e.r + 6, 2.0, 4.9);
+        ctx.stroke();
+      }
+      // 爆裂：亮橙脉冲环
+      if (e.affix === 'volatile') {
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = ac;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.45 + 0.3 * Math.sin(S.time * 11 + e.phase);
+        ctx.beginPath(); ctx.arc(0, 0, e.r + 5, 0, TAU); ctx.stroke();
+      }
+      // 寄生：三颗绿色孢子
+      if (e.affix === 'parasitic') {
+        ctx.shadowBlur = 6;
+        ctx.shadowColor = ac;
+        ctx.fillStyle = ac;
+        for (var pp = 0; pp < 3; pp++) {
+          var ppa = S.time * 2.1 + pp * TAU / 3;
+          ctx.beginPath();
+          ctx.arc(Math.cos(ppa) * (e.r + 8), Math.sin(ppa) * (e.r + 8), 2.2, 0, TAU);
+          ctx.fill();
+        }
+      }
+      // 被寄生死亡强化：绿色光环
+      if (e.buffT > 0) {
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = '#6dffb0';
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.5 + 0.25 * Math.sin(S.time * 12);
+        ctx.beginPath(); ctx.arc(0, 0, e.r + 10, 0, TAU); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
       if (e.maxHp > 1) {
         ctx.rotate(-(S.time * 2 + e.phase));
         ctx.shadowBlur = 0;
@@ -4321,7 +4526,7 @@
     applyUpgrade: applyUpgrade, chooseUpgrade: chooseUpgrade, rollUpgrades: rollUpgrades,
     updateUpgrade: updateUpgrade, updateReward: updateReward, updateEvolution: updateEvolution,
     switchEvoForm: switchEvoForm, updateFusion: updateFusion, rollWaveAffixes: rollWaveAffixes,
-    UPGRADE_DEFS: UPGRADE_DEFS,
+    updateAffixEffects: updateAffixEffects, UPGRADE_DEFS: UPGRADE_DEFS,
     spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
     selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
     ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
