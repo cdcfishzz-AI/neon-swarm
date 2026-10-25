@@ -1772,6 +1772,8 @@
     S.waveBannerText = 'WAVE ' + S.wave + ' · 强化完成';
     duckMusic(false);
     sfx.upgradePick();
+    // 若刚拿到“贯穿协议”且已持有 LANCE，立即满足裂空融合
+    if (!S.evolved) checkWeaponEvolution();
   }
 
   function spawnSurge(n) {
