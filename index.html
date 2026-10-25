@@ -227,7 +227,8 @@
     metaOpen: false, metaHover: -1, shardsEarned: 0,
     wingCount: 1, wingLevel: 1, wings: [],
     weaponPicks: null, evolved: null, evoForms: [], evolution: null, evoBanner: 0,
-    evoTier: 1, evoMats: {}, lastBaseWeapon: 'pulse', evoBannerTitle: '', evoBannerSub: '',
+    evoTier: 1, evoMats: {}, energyBank: 0, lastBaseWeapon: 'pulse',
+    evoBannerTitle: '', evoBannerSub: '',
     rewardT: 0, rewardDur: 0.3, rewardDrops: 0,
     sysLog: null,
     chainFx: [],
@@ -1328,7 +1329,7 @@
     S.metaOpen = false; S.metaHover = -1;
     S.weaponPicks = { pulse: 0, spread: 0, laser: 0 };
     S.evolved = null; S.evoForms = []; S.evolution = null; S.evoBanner = 0;
-    S.evoTier = 1; S.evoMats = {}; S.lastBaseWeapon = 'pulse';
+    S.evoTier = 1; S.evoMats = {}; S.energyBank = 0; S.lastBaseWeapon = 'pulse';
     S.evoBannerTitle = ''; S.evoBannerSub = '';
     input.firing = false;
     story.text = ''; story.t = -1; story.phase = -1;
@@ -1652,6 +1653,7 @@
       S.score += 40;
       label = '+40 分';
     }
+    chargeFusionEnergy(pk.type);
     var cfl = poolTake('floats', S.floats);
     cfl.x = p.x; cfl.y = p.y - 44; cfl.text = label;
     cfl.life = 1.0; cfl.max = 1.0; cfl.vy = -46; cfl.size = 16; cfl.color = info.color;
@@ -1702,16 +1704,35 @@
     var types = evoInfo(id).mats || ['pulse', 'pulse', 'spread', 'spread'];
     var out = [];
     for (var i = 0; i < 4; i++) {
-      var life = 20 - i * 2;
-      out.push({ type: types[i % types.length], life: life, max: life });
+      var energy = 100 - i * 15;
+      out.push({ type: types[i % types.length], life: energy, max: 100 });
     }
     return out;
+  }
+
+  function chargeFusionEnergy(type) {
+    var isWeapon = type.indexOf('w_') === 0;
+    var wid = type === 'w_spread' ? 'spread' : (type === 'w_laser' ? 'laser' : (type === 'w_pulse' ? 'pulse' : ''));
+    if (!S.evoForms.length || !S.evolved || !S.evoMats[S.evolved]) {
+      S.energyBank = Math.min(100, S.energyBank + (isWeapon ? 18 : 10));
+      return;
+    }
+    var arr = S.evoMats[S.evolved];
+    for (var i = 0; i < arr.length; i++) {
+      arr[i].life = Math.min(100, arr[i].life + (isWeapon ? 8 : 12));
+      if (isWeapon && arr[i].type === wid) arr[i].life = Math.min(100, arr[i].life + 35);
+    }
   }
 
   function evolveWeapon(id) {
     if (!S.evoForms.length) S.lastBaseWeapon = S.player.weapon;
     if (S.evoForms.indexOf(id) < 0) S.evoForms.push(id);
     S.evoMats[id] = makeFusionMats(id);
+    var bank = S.energyBank || 0;
+    S.energyBank = 0;
+    for (var bi = 0; bi < S.evoMats[id].length; bi++) {
+      S.evoMats[id][bi].life = Math.min(100, S.evoMats[id][bi].life + Math.round(bank * 0.3));
+    }
     S.evolved = id;
     S.player.weapon = id;
     S.evoTier = matTier(S.evoMats[id].length);
@@ -1735,7 +1756,7 @@
       var id = ids[i], types = evoInfo(id).mats || [], arr = S.evoMats[id];
       if (!arr || types.indexOf(type) < 0) continue;
       if (arr.length < 4) {
-        arr.push({ type: type, life: 12, max: 12 });
+        arr.push({ type: type, life: 45, max: 100 });
       } else {
         var idx = -1, low = Infinity;
         for (var j = 0; j < arr.length; j++) {
@@ -1744,7 +1765,7 @@
         if (idx < 0) {
           for (var k = 0; k < arr.length; k++) if (arr[k].life < low) { low = arr[k].life; idx = k; }
         }
-        arr[idx].life = 12; arr[idx].max = 12;
+        arr[idx].life = Math.min(100, arr[idx].life + 60);
       }
       if (id === S.evolved) S.evoTier = matTier(arr.length);
       setEvoBanner('FUSION MOUNT', type.toUpperCase() + ' 素材 · ' + arr.length + '/4', 1.2);
@@ -1761,7 +1782,7 @@
     S.evoTier = 1;
     S.player.weapon = S.lastBaseWeapon || 'pulse';
     S.fireCooldown = 0;
-    setEvoBanner('FUSION COLLAPSE', '素材耗尽 · 回到基础枪', 2.4);
+    setEvoBanner('FUSION COLLAPSE', '素材能量耗尽 · 回到基础枪', 2.4);
     S.victoryFlash = Math.max(S.victoryFlash, 0.3);
     S.trauma = Math.min(1, S.trauma + 0.25);
     sfx.formSwitch();
@@ -1776,7 +1797,7 @@
       var id = S.evoForms[i], arr = S.evoMats[id];
       if (!arr) { S.evoForms.splice(i, 1); continue; }
       for (j = arr.length - 1; j >= 0; j--) {
-        arr[j].life -= dt;
+        arr[j].life -= 4 * dt;
         if (arr[j].life <= 0) arr.splice(j, 1);
       }
       if (!arr.length) {
@@ -1789,14 +1810,14 @@
       S.evolved = S.evoForms[0];
       S.player.weapon = S.evolved;
       S.evoTier = matTier(S.evoMats[S.evolved].length);
-      setEvoBanner('FUSION DECAY', '素材耗尽 · 自动切换 ' + evoInfo(S.evolved).name, 1.8);
+      setEvoBanner('FUSION DECAY', '素材能量耗尽 · 自动切换 ' + evoInfo(S.evolved).name, 1.8);
       S.victoryFlash = Math.max(S.victoryFlash, 0.2);
       return;
     }
     var count = S.evoMats[S.evolved].length;
     S.evoTier = matTier(count);
     if (count < beforeCount) {
-      setEvoBanner('FUSION DECAY', count + '/4 · Lv.' + S.evoTier + ' · 素材过期', 1.6);
+      setEvoBanner('FUSION DECAY', count + '/4 · Lv.' + S.evoTier + ' · 素材能量耗尽', 1.6);
       S.victoryFlash = Math.max(S.victoryFlash, 0.16);
     }
   }
@@ -3219,7 +3240,8 @@
       ctx.textAlign = 'left';
       ctx.fillStyle = 'rgba(150, 180, 230, 0.55)';
       ctx.font = '600 10px ' + FONT;
-      ctx.fillText('FUSION ' + mats.length + '/4', W - 276, H - 82);
+      ctx.fillText('FUSION ENERGY ' + mats.length + '/4', W - 276, H - 82);
+      var totalEnergy = 0;
       for (var fm = 0; fm < 4; fm++) {
         var mt = mats[fm];
         var mx = W - 276 + fm * 62, my = H - 72;
@@ -3229,10 +3251,24 @@
         ctx.fillStyle = 'rgba(120, 150, 200, 0.22)';
         ctx.fillRect(mx, my + 6, 48, 4);
         if (mt) {
+          totalEnergy += mt.life;
           ctx.fillStyle = CFG.weapons[mt.type].color;
           ctx.fillRect(mx, my + 6, 48 * Math.max(0, mt.life / mt.max), 4);
         }
       }
+      ctx.fillStyle = 'rgba(120, 150, 200, 0.22)';
+      ctx.fillRect(W - 276, H - 58, 248, 2);
+      ctx.fillStyle = S.evoTier === 3 ? '#ffd45e' : '#8fb8ff';
+      ctx.fillRect(W - 276, H - 58, 248 * clamp(totalEnergy / (mats.length * 100 || 1), 0, 1), 2);
+    } else if (S.energyBank > 0) {
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(150, 180, 230, 0.55)';
+      ctx.font = '600 10px ' + FONT;
+      ctx.fillText('STANDBY ENERGY ' + Math.round(S.energyBank) + '%', W - 276, H - 72);
+      ctx.fillStyle = 'rgba(120, 150, 200, 0.22)';
+      ctx.fillRect(W - 276, H - 64, 248, 3);
+      ctx.fillStyle = '#5ee8ff';
+      ctx.fillRect(W - 276, H - 64, 248 * clamp(S.energyBank / 100, 0, 1), 3);
     }
     ctx.fillStyle = '#7fe8ff';
     ctx.font = '600 11px ' + FONT;
