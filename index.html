@@ -1736,12 +1736,11 @@
     S.evolved = id;
     S.player.weapon = id;
     S.evoTier = matTier(S.evoMats[id].length);
-    S.mode = 'evolution';
-    S.evolution = { t: 0, dur: 0.55, id: id };
-    setEvoBanner('WEAPON EVOLUTION', evoInfo(id).sub, 2.8);
+    // 进化不再切换 mode/暂停，也不打断按住开火：只做即时视觉反馈
+    S.evolution = null;
+    setEvoBanner('WEAPON EVOLUTION', evoInfo(id).sub, 1.8);
     S.fireCooldown = 0;
-    input.firing = false;
-    S.victoryFlash = 0.5;
+    S.victoryFlash = 0.3;
     S.trauma = Math.min(1, S.trauma + 0.3);
     sparkBurst(S.player.x, S.player.y, 30, id === 'nova' ? '#ffd45e' : '#c9a2ff');
     var rg = poolTake('rings', S.rings);
@@ -1796,8 +1795,10 @@
     for (i = S.evoForms.length - 1; i >= 0; i--) {
       var id = S.evoForms[i], arr = S.evoMats[id];
       if (!arr) { S.evoForms.splice(i, 1); continue; }
+      // Boss 战临时决策：能量消耗减半，避免高压躲弹时融合被硬性抽干
+      var drain = S.wavePhase === 'boss' ? 2 : 4;
       for (j = arr.length - 1; j >= 0; j--) {
-        arr[j].life -= 4 * dt;
+        arr[j].life -= drain * dt;
         if (arr[j].life <= 0) arr.splice(j, 1);
       }
       if (!arr.length) {
@@ -1836,15 +1837,9 @@
 
   function evoInfo(id) { return CFG.evo[id] || { name: id, sub: '', mats: [] }; }
 
-  function updateEvolution(dt) {
-    if (S.evolution) S.evolution.t += dt;
-    if (S.victoryFlash > 0) S.victoryFlash = Math.max(0, S.victoryFlash - dt);
-    updateShake(dt);
-    stepParticles(dt * 0.4);
-    if (!S.evolution || S.evolution.t >= S.evolution.dur) {
-      S.mode = 'playing';
-      S.evolution = null;
-    }
+  // 兼容旧测试/调用：进化现在是非阻塞的，不再有独立暂停阶段
+  function updateEvolution() {
+    S.evolution = null;
   }
 
   // ===== Boss 战利品：暂停三选一强化 =====
@@ -3155,7 +3150,7 @@
 
     // 武器进化横幅
     if (S.evoBanner > 0) {
-      var ea = clamp(S.evoBanner / 2.8, 0, 1);
+      var ea = clamp(S.evoBanner / 1.8, 0, 1);
       var evoName = evoInfo(S.evolved).name;
       var evoSub = S.evoBannerSub || evoInfo(S.evolved).sub;
       ctx.save();
@@ -3240,7 +3235,8 @@
       ctx.textAlign = 'left';
       ctx.fillStyle = 'rgba(150, 180, 230, 0.55)';
       ctx.font = '600 10px ' + FONT;
-      ctx.fillText('FUSION ENERGY ' + mats.length + '/4', W - 276, H - 82);
+      ctx.fillText('FUSION ENERGY ' + mats.length + '/4' +
+        (S.wavePhase === 'boss' ? ' · BOSS 半耗' : ''), W - 276, H - 82);
       var totalEnergy = 0;
       for (var fm = 0; fm < 4; fm++) {
         var mt = mats[fm];
@@ -3925,7 +3921,6 @@
     else if (S.mode === 'dead') updateDeath(dt);
     else if (S.mode === 'intro') updateIntro(dt);
     else if (S.mode === 'reward') updateReward(dt);
-    else if (S.mode === 'evolution') updateEvolution(dt);
     else if (S.mode === 'upgrade') updateUpgrade(dt);
     else if (S.mode === 'select') S.selectT += dt;
     if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
