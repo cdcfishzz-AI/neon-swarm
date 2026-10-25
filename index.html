@@ -238,7 +238,7 @@
     metaOpen: false, metaHover: -1, shardsEarned: 0,
     wingCount: 1, wingLevel: 1, wings: [],
     weaponPicks: null, evolved: null, evoForms: [], evolution: null, evoBanner: 0,
-    evoTier: 1, evoMats: {}, energyBank: 0, lastBaseWeapon: 'pulse',
+    evoTier: 1, evoMats: {}, energyBank: 0, lastBaseWeapon: 'pulse', bossRefundArmed: false,
     evoBannerTitle: '', evoBannerSub: '',
     rewardT: 0, rewardDur: 0.3, rewardDrops: 0,
     sysLog: null,
@@ -1340,7 +1340,7 @@
     S.metaOpen = false; S.metaHover = -1;
     S.weaponPicks = { pulse: 0, spread: 0, laser: 0 };
     S.evolved = null; S.evoForms = []; S.evolution = null; S.evoBanner = 0;
-    S.evoTier = 1; S.evoMats = {}; S.energyBank = 0; S.lastBaseWeapon = 'pulse';
+    S.evoTier = 1; S.evoMats = {}; S.energyBank = 0; S.lastBaseWeapon = 'pulse'; S.bossRefundArmed = false;
     S.evoBannerTitle = ''; S.evoBannerSub = '';
     input.firing = false;
     story.text = ''; story.t = -1; story.phase = -1;
@@ -1604,6 +1604,8 @@
       b.color = w.color;
     }
     if (S.evolved) consumeFusionEnergy(CFG.fusion.fireCost);
+    // 每次开火最多让 Boss 回一次能：高弹丸/高射速不能无限抵消消耗
+    S.bossRefundArmed = !!S.evolved;
     S.fireCooldown = fireInterval();
     S.muzzle = CFG.fx.muzzle;
     sfx.shoot();
@@ -2375,7 +2377,10 @@
     if (!b || b.state !== 'active') return;
     b.hp -= dmg;
     b.flash = 0.09;
-    refundFusionEnergy(CFG.fusion.bossHitRefund);
+    if (S.bossRefundArmed) {
+      S.bossRefundArmed = false;
+      refundFusionEnergy(CFG.fusion.bossHitRefund);
+    }
     sparkBurst(hx, hy, 4, '#ffd45e');
     S.trauma = Math.min(1, S.trauma + 0.02);
     var ratio = b.maxHp > 0 ? b.hp / b.maxHp : 0;
