@@ -108,6 +108,7 @@
       w_laser:  { name: '穿透枪', glyph: 'L', color: '#bff4ff' }
     },
     pickup: { chance: 0.16, pityEvery: 15, life: 12, magnet: 90, radius: 18, cap: 14 },
+    fusion: { drain: 4, bossDrain: 2, fireCost: 0.8, bossHitRefund: 0.6, capBase: 100, coreCap: 15 },
 
     // 波次 + Boss：60s 一波，50s 起警告，60s 小怪聚合出 Boss；Boss HP 线性增长（+250/波）
     wave: {
@@ -162,6 +163,16 @@
     { id: 'lifesteal', name: '纳米回收', family: 'green', max: 2,
       desc: function (n) { return '击杀有 ' + ((n + 1) * 10) + '% 概率回复 1 点生命'; },
       apply: function () { S.upgrades.lifesteal += 1; } },
+    { id: 'core', name: '能量核心', family: 'green', max: 3,
+      desc: function (n) { return '融合上限 +' + CFG.fusion.coreCap + '，立即回能 35'; },
+      apply: function () {
+        S.upgrades.core += 1;
+        var cap = fusionCap(), mats = S.evoMats[S.evolved];
+        if (mats) for (var i = 0; i < mats.length; i++) {
+          mats[i].max = cap;
+          mats[i].life = Math.min(cap, mats[i].life + 35);
+        }
+      } },
     { id: 'combo', name: '连击带宽', family: 'blue', max: 2,
       desc: function (n) { return '连击窗口 +' + Math.round((COMBO_STEPS[n] - 1) * 100) + '%'; },
       apply: function (n) { S.upgrades.combo *= COMBO_STEPS[n]; } },
@@ -1313,7 +1324,7 @@
     S.upgrades = {
       shots: 0, rate: 1, dmg: 1, pierce: false,
       speed: 1, hpBonus: 0, magnet: 1, combo: 1, bulletSpeed: 1,
-      lifesteal: 0, chain: 0,
+      lifesteal: 0, chain: 0, core: 0,
       picks: {}, family: { yellow: 0, pink: 0, green: 0, blue: 0 }
     };
     var metaHp = meta ? meta.hp : 0;
@@ -1592,6 +1603,7 @@
       if (b.hits) b.hits.length = 0; else b.hits = [];
       b.color = w.color;
     }
+    if (S.evolved) consumeFusionEnergy(CFG.fusion.fireCost);
     S.fireCooldown = fireInterval();
     S.muzzle = CFG.fx.muzzle;
     sfx.shoot();
@@ -1700,12 +1712,16 @@
     return 1;
   }
 
+  function fusionCap() {
+    return CFG.fusion.capBase + (S.upgrades ? S.upgrades.core : 0) * CFG.fusion.coreCap;
+  }
+
   function makeFusionMats(id) {
     var types = evoInfo(id).mats || ['pulse', 'pulse', 'spread', 'spread'];
-    var out = [];
+    var out = [], cap = fusionCap();
     for (var i = 0; i < 4; i++) {
-      var energy = 100 - i * 15;
-      out.push({ type: types[i % types.length], life: energy, max: 100 });
+      var energy = Math.round(cap * (1 - i * 0.15));
+      out.push({ type: types[i % types.length], life: energy, max: cap });
     }
     return out;
   }
@@ -1717,11 +1733,32 @@
       S.energyBank = Math.min(100, S.energyBank + (isWeapon ? 18 : 10));
       return;
     }
-    var arr = S.evoMats[S.evolved];
+    var arr = S.evoMats[S.evolved], cap = fusionCap();
     for (var i = 0; i < arr.length; i++) {
-      arr[i].life = Math.min(100, arr[i].life + (isWeapon ? 8 : 12));
-      if (isWeapon && arr[i].type === wid) arr[i].life = Math.min(100, arr[i].life + 35);
+      arr[i].life = Math.min(cap, arr[i].life + (isWeapon ? 8 : 12));
+      if (isWeapon && arr[i].type === wid) arr[i].life = Math.min(cap, arr[i].life + 35);
     }
+  }
+
+  function consumeFusionEnergy(amount) {
+    if (!S.evoForms.length || !S.evolved) return;
+    var arr = S.evoMats[S.evolved];
+    if (!arr || !arr.length) return;
+    var idx = 0;
+    for (var i = 1; i < arr.length; i++) if (arr[i].life < arr[idx].life) idx = i;
+    arr[idx].life = Math.max(0, arr[idx].life - amount);
+  }
+
+  function refundFusionEnergy(amount) {
+    if (!S.evoForms.length || !S.evolved) {
+      S.energyBank = Math.min(100, S.energyBank + amount);
+      return;
+    }
+    var arr = S.evoMats[S.evolved];
+    if (!arr || !arr.length) return;
+    var idx = 0;
+    for (var i = 1; i < arr.length; i++) if (arr[i].life < arr[idx].life) idx = i;
+    arr[idx].life = Math.min(fusionCap(), arr[idx].life + amount);
   }
 
   function evolveWeapon(id) {
@@ -1730,8 +1767,10 @@
     S.evoMats[id] = makeFusionMats(id);
     var bank = S.energyBank || 0;
     S.energyBank = 0;
+    var cap = fusionCap();
     for (var bi = 0; bi < S.evoMats[id].length; bi++) {
-      S.evoMats[id][bi].life = Math.min(100, S.evoMats[id][bi].life + Math.round(bank * 0.3));
+      S.evoMats[id][bi].max = cap;
+      S.evoMats[id][bi].life = Math.min(cap, S.evoMats[id][bi].life + Math.round(bank * 0.3));
     }
     S.evolved = id;
     S.player.weapon = id;
@@ -1754,8 +1793,9 @@
     for (var i = 0; i < ids.length; i++) {
       var id = ids[i], types = evoInfo(id).mats || [], arr = S.evoMats[id];
       if (!arr || types.indexOf(type) < 0) continue;
+      var cap = fusionCap();
       if (arr.length < 4) {
-        arr.push({ type: type, life: 45, max: 100 });
+        arr.push({ type: type, life: Math.round(cap * 0.45), max: cap });
       } else {
         var idx = -1, low = Infinity;
         for (var j = 0; j < arr.length; j++) {
@@ -1764,7 +1804,8 @@
         if (idx < 0) {
           for (var k = 0; k < arr.length; k++) if (arr[k].life < low) { low = arr[k].life; idx = k; }
         }
-        arr[idx].life = Math.min(100, arr[idx].life + 60);
+        arr[idx].life = Math.min(cap, arr[idx].life + 60);
+        arr[idx].max = cap;
       }
       if (id === S.evolved) S.evoTier = matTier(arr.length);
       setEvoBanner('FUSION MOUNT', type.toUpperCase() + ' 素材 · ' + arr.length + '/4', 1.2);
@@ -1796,7 +1837,7 @@
       var id = S.evoForms[i], arr = S.evoMats[id];
       if (!arr) { S.evoForms.splice(i, 1); continue; }
       // Boss 战临时决策：能量消耗减半，避免高压躲弹时融合被硬性抽干
-      var drain = S.wavePhase === 'boss' ? 2 : 4;
+      var drain = S.wavePhase === 'boss' ? CFG.fusion.bossDrain : CFG.fusion.drain;
       for (j = arr.length - 1; j >= 0; j--) {
         arr[j].life -= drain * dt;
         if (arr[j].life <= 0) arr.splice(j, 1);
@@ -2334,6 +2375,7 @@
     if (!b || b.state !== 'active') return;
     b.hp -= dmg;
     b.flash = 0.09;
+    refundFusionEnergy(CFG.fusion.bossHitRefund);
     sparkBurst(hx, hy, 4, '#ffd45e');
     S.trauma = Math.min(1, S.trauma + 0.02);
     var ratio = b.maxHp > 0 ? b.hp / b.maxHp : 0;
@@ -3237,7 +3279,7 @@
       ctx.font = '600 10px ' + FONT;
       ctx.fillText('FUSION ENERGY ' + mats.length + '/4' +
         (S.wavePhase === 'boss' ? ' · BOSS 半耗' : ''), W - 276, H - 82);
-      var totalEnergy = 0;
+      var totalEnergy = 0, totalMax = 0;
       for (var fm = 0; fm < 4; fm++) {
         var mt = mats[fm];
         var mx = W - 276 + fm * 62, my = H - 72;
@@ -3248,6 +3290,7 @@
         ctx.fillRect(mx, my + 6, 48, 4);
         if (mt) {
           totalEnergy += mt.life;
+          totalMax += mt.max;
           ctx.fillStyle = CFG.weapons[mt.type].color;
           ctx.fillRect(mx, my + 6, 48 * Math.max(0, mt.life / mt.max), 4);
         }
@@ -3255,7 +3298,7 @@
       ctx.fillStyle = 'rgba(120, 150, 200, 0.22)';
       ctx.fillRect(W - 276, H - 58, 248, 2);
       ctx.fillStyle = S.evoTier === 3 ? '#ffd45e' : '#8fb8ff';
-      ctx.fillRect(W - 276, H - 58, 248 * clamp(totalEnergy / (mats.length * 100 || 1), 0, 1), 2);
+      ctx.fillRect(W - 276, H - 58, 248 * clamp(totalEnergy / (totalMax || 1), 0, 1), 2);
     } else if (S.energyBank > 0) {
       ctx.textAlign = 'left';
       ctx.fillStyle = 'rgba(150, 180, 230, 0.55)';
