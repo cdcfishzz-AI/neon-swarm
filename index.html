@@ -109,6 +109,12 @@
     },
     pickup: { chance: 0.16, pityEvery: 15, life: 12, magnet: 90, radius: 18, cap: 14 },
     fusion: { drain: 4, bossDrain: 2, fireCost: 0.8, bossHitRefund: 0.6, capBase: 100, coreCap: 15 },
+    affix: { chance: 0.36, fieldRadius: 78, fieldLife: 0.3, fieldSlow: 0.45 },
+    affixes: {
+      swift:  { name: '迅捷', color: '#ffe27a', desc: '速度 +50% · HP −30%' },
+      split:  { name: '分裂', color: '#c9a2ff', desc: '死亡分裂 2 个 40% HP 小怪' },
+      magnet: { name: '磁暴', color: '#5ee8ff', desc: '死亡留下 0.3s 减速场' }
+    },
 
     // 波次 + Boss：60s 一波，50s 起警告，60s 小怪聚合出 Boss；Boss HP 线性增长（+250/波）
     wave: {
@@ -231,6 +237,7 @@
     deathT: 0, deathReport: null,
     introT: 0, selectT: 1,
     wave: 1, waveT: 0, wavePhase: 'normal', warnTick: 0,
+    waveAffixes: [], affixCursor: 0, fields: [],
     waveBanner: 0, waveBannerText: '',
     victoryFlash: 0,
     upgrade: null,
@@ -393,7 +400,8 @@
       o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.r = 0; o.color = '';
     } else if (kind === 'enemies') {
       o.x = 0; o.y = 0; o.r = 0; o.hp = 0; o.maxHp = 0; o.spd = 0; o.phase = 0;
-      o.flash = 0; o.__uid = undefined; o.__idx = -1;
+      o.flash = 0; o.affix = null; o.affixT = 0; o.splitDepth = 0;
+      o.__uid = undefined; o.__idx = -1;
     } else if (kind === 'sparks') {
       o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.max = 0; o.size = 0; o.color = '';
     } else if (kind === 'chunks') {
@@ -1313,6 +1321,7 @@
     poolReleaseAll('rings', S.rings); poolReleaseAll('floats', S.floats);
     poolReleaseAll('pickups', S.pickups); poolReleaseAll('ebullets', S.ebullets);
     S.wave = 1; S.waveT = 0; S.wavePhase = 'normal'; S.warnTick = 0;
+    S.waveAffixes = []; S.affixCursor = 0; S.fields.length = 0;
     S.waveBanner = 0; S.waveBannerText = ''; S.boss = null;
     S.victoryFlash = 0;
     S.upgrade = null;
@@ -1372,6 +1381,21 @@
     sfx.uiBack();
   }
 
+  function rollWaveAffixes() {
+    S.waveAffixes = [];
+    S.affixCursor = 0;
+    if (S.wave < 2) return;
+    var ids = Object.keys(CFG.affixes), count = S.wave >= 4 ? 2 : 1;
+    for (var i = 0; i < count && ids.length; i++) {
+      var j = Math.floor(rnd() * ids.length);
+      S.waveAffixes.push(ids.splice(j, 1)[0]);
+    }
+  }
+
+  function affixText() {
+    return S.waveAffixes.map(function (id) { return CFG.affixes[id].name; }).join(' · ');
+  }
+
   function spawnEnemy() {
     if (S.enemies.length >= CFG.enemy.cap) return;
     var side = Math.floor(rnd() * 4), m = 24, x, y;
@@ -1382,12 +1406,60 @@
     var waveLv = Math.max(0, S.wave - 1);
     var hp = Math.min(CFG.enemy.hpMax + 2,
       1 + Math.floor(S.elapsed / CFG.enemy.hpPerSec) + Math.floor(waveLv / 2));
+    var spd = (CFG.enemy.speedMin + Math.min(S.elapsed * CFG.enemy.speedRamp, CFG.enemy.speedMax - CFG.enemy.speedMin))
+      * (1 + waveLv * 0.05);
+    var affix = null;
+    if (S.wave >= 2 && S.wavePhase === 'normal' && S.waveAffixes.length &&
+        rnd() < CFG.affix.chance) {
+      affix = S.waveAffixes[S.affixCursor % S.waveAffixes.length];
+      S.affixCursor += 1;
+    }
+    if (affix === 'swift') { hp = Math.max(1, Math.round(hp * 0.7)); spd *= 1.5; }
     var e = poolTake('enemies', S.enemies);
     e.x = x; e.y = y; e.r = CFG.enemy.r; e.hp = hp; e.maxHp = hp;
-    e.spd = (CFG.enemy.speedMin + Math.min(S.elapsed * CFG.enemy.speedRamp, CFG.enemy.speedMax - CFG.enemy.speedMin))
-      * (1 + waveLv * 0.05);
+    e.spd = spd;
     e.phase = rnd() * TAU; e.flash = 0;
+    e.affix = affix; e.affixT = 0; e.splitDepth = 0;
     e.__uid = ++enemyUidSeq; e.__idx = -1;
+    if (affix) sparkBurst(x, y, 7, CFG.affixes[affix].color);
+  }
+
+  function spawnSplitChildren(e) {
+    if (e.splitDepth > 0) return;
+    if (S.enemies.length + 2 > CFG.enemy.cap) return;
+    var a = Math.atan2(S.player.y - e.y, S.player.x - e.x);
+    for (var k = -1; k <= 1; k += 2) {
+      var c = poolTake('enemies', S.enemies);
+      c.x = clamp(e.x + Math.cos(a + k * 1.1) * e.r * 1.2, 20, W - 20);
+      c.y = clamp(e.y + Math.sin(a + k * 1.1) * e.r * 1.2, 20, H - 20);
+      c.r = e.r * 0.66;
+      c.maxHp = Math.max(1, Math.round(e.maxHp * 0.4));
+      c.hp = c.maxHp;
+      c.spd = e.spd * 1.15;
+      c.phase = rnd() * TAU; c.flash = 0;
+      c.affix = null; c.affixT = 0; c.splitDepth = 1;
+      c.__uid = ++enemyUidSeq; c.__idx = -1;
+    }
+    sparkBurst(e.x, e.y, 12, '#c9a2ff');
+    var rg = poolTake('rings', S.rings);
+    rg.x = e.x; rg.y = e.y; rg.r = 8; rg.r1 = 58;
+    rg.life = 0.35; rg.max = 0.35; rg.color = '#c9a2ff';
+  }
+
+  function spawnAffixField(x, y) {
+    if (S.fields.length >= 32) S.fields.shift();
+    S.fields.push({
+      x: x, y: y, r: CFG.affix.fieldRadius,
+      life: CFG.affix.fieldLife, max: CFG.affix.fieldLife
+    });
+    sparkBurst(x, y, 10, '#5ee8ff');
+  }
+
+  function updateAffixFields(dt) {
+    for (var i = S.fields.length - 1; i >= 0; i--) {
+      S.fields[i].life -= dt;
+      if (S.fields[i].life <= 0) S.fields.splice(i, 1);
+    }
   }
 
   function sparkBurst(x, y, n, color) {
@@ -1418,6 +1490,9 @@
     var rg = poolTake('rings', S.rings);
     rg.x = e.x; rg.y = e.y; rg.r = 6; rg.r1 = 46;
     rg.life = CFG.fx.ringLife; rg.max = CFG.fx.ringLife; rg.color = COL.ring;
+    if (e.affix === 'split') spawnSplitChildren(e);
+    if (e.affix === 'magnet') spawnAffixField(e.x, e.y);
+    if (e.affix) sparkBurst(e.x, e.y, 7, CFG.affixes[e.affix].color);
     if (!award) { sparkBurst(e.x, e.y, 6, COL.chunk); return; }
     S.trauma = Math.min(1, S.trauma + CFG.shake.kill);
     S.combo += 1;
@@ -2010,7 +2085,8 @@
     S.spawnTimer = 0.45;
     spawnSurge(8);
     S.waveBanner = 2.2;
-    S.waveBannerText = 'WAVE ' + S.wave + ' · 强化完成';
+    S.waveBannerText = 'WAVE ' + S.wave + ' · 强化完成' +
+      (S.waveAffixes.length ? ' · ' + affixText() : '');
     duckMusic(false);
     sfx.upgradePick();
     // 若刚拿到“贯穿协议”且已持有 LANCE，立即满足裂空融合
@@ -2301,6 +2377,9 @@
 
   function spawnBoss() {
     S.wavePhase = 'boss';
+    S.waveAffixes = [];
+    S.affixCursor = 0;
+    S.fields.length = 0;
     var floorHp = CFG.wave.bossBaseHp + CFG.wave.bossHpPerWave * (S.wave - 1);
     var hp = Math.max(floorHp, Math.round(playerDpsEstimate() * CFG.wave.bossTtk));
     S.boss = {
@@ -2448,6 +2527,7 @@
     S.wave += 1;
     S.waveT = 0;
     S.wavePhase = 'normal';
+    rollWaveAffixes();
     S.spawnTimer = 0.4;
     S.waveBanner = 0;
     S.waveBannerText = '';
@@ -2479,6 +2559,7 @@
 
     S.time += dt; S.elapsed += dt;
     updateWave(dt);
+    updateAffixFields(dt);
     var p = S.player, i, j;
 
     if (p.inv > 0) p.inv = Math.max(0, p.inv - dt);
@@ -2492,6 +2573,10 @@
     var dl = Math.hypot(dx, dy);
     if (dl > 0) { dx /= dl; dy /= dl; }
     var spd = ship().speed * (S.upgrades ? S.upgrades.speed : 1) * (1 + 0.05 * (meta ? meta.speed : 0));
+    for (i = 0; i < S.fields.length; i++) {
+      var ff = S.fields[i], fdx = p.x - ff.x, fdy = p.y - ff.y;
+      if (fdx * fdx + fdy * fdy < (ff.r + p.r) * (ff.r + p.r)) { spd *= CFG.affix.fieldSlow; break; }
+    }
     p.x = clamp(p.x + dx * spd * dt, p.r, W - p.r);
     p.y = clamp(p.y + dy * spd * dt, p.r, H - p.r);
 
@@ -2912,6 +2997,29 @@
     ctx.restore();
   }
 
+  function drawAffixFields() {
+    for (var i = 0; i < S.fields.length; i++) {
+      var f = S.fields[i], a = clamp(f.life / f.max, 0, 1);
+      ctx.save();
+      ctx.translate(f.x, f.y);
+      ctx.globalAlpha = 0.3 + a * 0.55;
+      ctx.fillStyle = 'rgba(94, 232, 255, 0.10)';
+      ctx.beginPath(); ctx.arc(0, 0, f.r, 0, TAU); ctx.fill();
+      ctx.strokeStyle = '#5ee8ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, f.r, 0, TAU); ctx.stroke();
+      ctx.rotate(S.time * 5);
+      ctx.strokeStyle = '#bff4ff';
+      ctx.lineWidth = 1.5;
+      for (var k = 0; k < 3; k++) {
+        ctx.beginPath();
+        ctx.arc(0, 0, f.r * (0.45 + k * 0.16), k * 2.1, k * 2.1 + 1.1);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
   function drawWorld() {
     var i, t, p = S.player;
     renderStats.drawn = 0;
@@ -2979,17 +3087,37 @@
     ctx.shadowBlur = 0;
     ctx.globalCompositeOperation = 'source-over';
 
+    drawAffixFields();
+
     // 敌人
     for (i = 0; i < S.enemies.length; i++) {
       var e = S.enemies[i];
       if (!inView(e.x, e.y, e.r + 10)) { renderStats.culled++; continue; }
       renderStats.drawn++;
+      var affix = e.affix ? CFG.affixes[e.affix] : null;
+      var ac = affix ? affix.color : null;
       ctx.save();
       ctx.translate(e.x, e.y);
+      // 迅捷：朝玩家方向的拖尾速度线
+      if (e.affix === 'swift') {
+        var sa = Math.atan2(S.player.y - e.y, S.player.x - e.x);
+        ctx.save();
+        ctx.rotate(sa);
+        ctx.globalAlpha = 0.35 + 0.2 * Math.sin(S.time * 18 + e.phase);
+        ctx.strokeStyle = ac;
+        ctx.lineWidth = 1.5;
+        for (var sk = -1; sk <= 1; sk += 2) {
+          ctx.beginPath();
+          ctx.moveTo(-e.r * 1.1, sk * e.r * 0.45);
+          ctx.lineTo(-e.r * (2.3 + sk * 0.2), sk * e.r * 0.85);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
       ctx.rotate(S.time * 2 + e.phase);
-      ctx.shadowColor = COL.enemy;
-      ctx.shadowBlur = 8;
-      ctx.fillStyle = e.flash > 0 ? '#ffffff' : COL.enemy;
+      ctx.shadowColor = ac || COL.enemy;
+      ctx.shadowBlur = ac ? 14 : 8;
+      ctx.fillStyle = e.flash > 0 ? '#ffffff' : (ac || COL.enemy);
       ctx.beginPath();
       ctx.moveTo(0, -e.r);
       ctx.lineTo(e.r * 0.86, 0);
@@ -2997,6 +3125,31 @@
       ctx.lineTo(-e.r * 0.86, 0);
       ctx.closePath();
       ctx.fill();
+      // 分裂：两颗环绕的紫色碎片
+      if (e.affix === 'split') {
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = '#e4d4ff';
+        for (var sp = 0; sp < 2; sp++) {
+          var spa = S.time * 3.4 + sp * Math.PI;
+          ctx.save();
+          ctx.translate(Math.cos(spa) * (e.r + 7), Math.sin(spa) * (e.r + 7));
+          ctx.rotate(spa);
+          ctx.fillRect(-2.5, -2.5, 5, 5);
+          ctx.restore();
+        }
+      }
+      // 磁暴：环绕电弧
+      if (e.affix === 'magnet') {
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = ac;
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.55 + 0.25 * Math.sin(S.time * 12 + e.phase);
+        for (var ma = 0; ma < 2; ma++) {
+          ctx.beginPath();
+          ctx.arc(0, 0, e.r + 6 + ma * 4, S.time * 4 + ma * 2.4, S.time * 4 + ma * 2.4 + 1.2);
+          ctx.stroke();
+        }
+      }
       if (e.maxHp > 1) {
         ctx.rotate(-(S.time * 2 + e.phase));
         ctx.shadowBlur = 0;
@@ -3168,6 +3321,19 @@
     ctx.font = '600 13px ' + FONT;
     ctx.fillStyle = S.wavePhase === 'warning' ? '#ff5c86' : (S.wavePhase === 'boss' ? '#ff8fb8' : '#9fc4ff');
     ctx.fillText('WAVE ' + S.wave + (S.wavePhase === 'boss' ? ' · BOSS' : ''), 32, 66);
+    if (S.waveAffixes.length && S.wavePhase !== 'boss') {
+      var ax = 32;
+      ctx.font = '600 10px ' + FONT;
+      ctx.fillStyle = 'rgba(150, 180, 220, 0.6)';
+      ctx.fillText('AFFIX', ax, 84);
+      ax += 40;
+      for (var ai = 0; ai < S.waveAffixes.length; ai++) {
+        var ad = CFG.affixes[S.waveAffixes[ai]];
+        ctx.fillStyle = ad.color;
+        ctx.fillText(ad.name, ax, 84);
+        ax += ctx.measureText(ad.name).width + 10;
+      }
+    }
 
     // Boss 血条
     if (S.boss) {
@@ -4154,7 +4320,8 @@
     spawnBoss: spawnBoss, damageBoss: damageBoss, fireBossRing: fireBossRing,
     applyUpgrade: applyUpgrade, chooseUpgrade: chooseUpgrade, rollUpgrades: rollUpgrades,
     updateUpgrade: updateUpgrade, updateReward: updateReward, updateEvolution: updateEvolution,
-    switchEvoForm: switchEvoForm, updateFusion: updateFusion, UPGRADE_DEFS: UPGRADE_DEFS,
+    switchEvoForm: switchEvoForm, updateFusion: updateFusion, rollWaveAffixes: rollWaveAffixes,
+    UPGRADE_DEFS: UPGRADE_DEFS,
     spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
     selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
     ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
