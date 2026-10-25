@@ -70,7 +70,20 @@
       nova:   { name: '星爆', cn: 'NOVA', base: 0.21, speed: 920, life: 4.0, pellets: 3, spread: 0.16,
                 dmg: 1.15, color: '#ffd45e', pierce: false, evolved: 'nova' },
       rift:   { name: '裂空', cn: 'RIFT', base: 0.14, constant: true, speed: 1900, life: 4.0, pellets: 1, spread: 0,
-                dmg: 2.6, color: '#c9a2ff', pierce: true, evolved: 'rift' }
+                dmg: 2.6, color: '#c9a2ff', pierce: true, evolved: 'rift' },
+      prism:  { name: '棱镜', cn: 'PRISM', base: 0.26, speed: 800, life: 4.0, pellets: 5, spread: 0.13,
+                dmg: 0.9, color: '#6dffb0', pierce: false, bounce: 1, evolved: 'prism' },
+      judgment: { name: '审判', cn: 'JUDGMENT', base: 0.38, speed: 1600, life: 4.0, pellets: 5, spread: 0.12,
+                dmg: 1.1, color: '#ff9fc4', pierce: true, evolved: 'judgment' },
+      pulsar: { name: '相位', cn: 'PULSAR', base: 0.18, speed: 1000, life: 4.0, pellets: 2, spread: 0.05,
+                dmg: 1.6, color: '#9feaff', pierce: true, homing: true, evolved: 'pulsar' }
+    },
+    evo: {
+      nova:     { name: '星爆', sub: '命中分裂 · 脉冲散射融合' },
+      prism:    { name: '棱镜', sub: '边界折射 · 散射棱镜' },
+      rift:     { name: '裂空', sub: '命中点爆炸 · 穿透弹道' },
+      judgment: { name: '审判', sub: '穿透弹幕 · 散射穿透融合' },
+      pulsar:   { name: '相位', sub: '自动追踪 · 脉冲穿透融合' }
     },
 
     // 掉落权重（击杀随机掉落；每 15 杀保底一个）
@@ -361,6 +374,7 @@
       o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.dmg = 0; o.r = 0;
       o.pierce = false; o.bossHit = false; o.color = '';
       o.child = false; o.splitDone = false; o.exploded = false;
+      o.bounce = 0; o.homing = false;
       if (o.hits) o.hits.length = 0; else o.hits = [];
     } else if (kind === 'ebullets') {
       o.x = 0; o.y = 0; o.vx = 0; o.vy = 0; o.life = 0; o.r = 0; o.color = '';
@@ -1411,6 +1425,28 @@
     sfx.kill();
   }
 
+  function steerBullet(b, dt) {
+    var best = null, bd = 240 * 240, i;
+    if (S.boss && S.boss.state === 'active') {
+      var bx = S.boss.x - b.x, by = S.boss.y - b.y, bdd = bx * bx + by * by;
+      if (bdd < bd) { bd = bdd; best = S.boss; }
+    }
+    for (i = 0; i < S.enemies.length; i++) {
+      var e = S.enemies[i];
+      if (e.hp <= 0) continue;
+      var dx = e.x - b.x, dy = e.y - b.y, d2 = dx * dx + dy * dy;
+      if (d2 < bd) { bd = d2; best = e; }
+    }
+    if (!best) return;
+    var targetA = Math.atan2(best.y - b.y, best.x - b.x);
+    var curA = Math.atan2(b.vy, b.vx);
+    var diff = Math.atan2(Math.sin(targetA - curA), Math.cos(targetA - curA));
+    var turn = clamp(diff, -3.2 * dt, 3.2 * dt);
+    var na = curA + turn, sp = Math.hypot(b.vx, b.vy);
+    b.vx = Math.cos(na) * sp;
+    b.vy = Math.sin(na) * sp;
+  }
+
   function spawnSplit(b) {
     var a = Math.atan2(b.vy, b.vx), sp = Math.hypot(b.vx, b.vy) * 0.85;
     for (var k = -1; k <= 1; k += 2) {
@@ -1421,6 +1457,7 @@
       nb.life = 1.1; nb.dmg = b.dmg * 0.55; nb.r = 2;
       nb.pierce = false; nb.bossHit = false;
       nb.child = true; nb.splitDone = true; nb.exploded = false;
+      nb.bounce = 0; nb.homing = false;
       if (nb.hits) nb.hits.length = 0; else nb.hits = [];
       nb.color = '#ffd45e';
     }
@@ -1533,6 +1570,7 @@
       b.pierce = !!w.pierce || !!(S.upgrades && S.upgrades.pierce);
       b.bossHit = false;
       b.child = false; b.splitDone = false; b.exploded = false;
+      b.bounce = w.bounce || 0; b.homing = !!w.homing;
       if (b.hits) b.hits.length = 0; else b.hits = [];
       b.color = w.color;
     }
@@ -1605,15 +1643,17 @@
   // ===== 武器融合进化：PULSE/SCATTER → 星爆；LANCE(+穿透) → 裂空 =====
   function checkWeaponEvolution() {
     if (S.evolved) return;
-    var q = S.weaponPicks;
-    // 任意两次脉冲/散射拾取：脉冲×2、散射×2、或 PULSE × SCATTER
-    if ((q.pulse || 0) + (q.spread || 0) >= 2) {
-      evolveWeapon('nova');
-      return;
-    }
-    if ((q.laser || 0) >= 2 || ((q.laser || 0) >= 1 && S.upgrades.pierce)) {
-      evolveWeapon('rift');
-    }
+    var q = S.weaponPicks, pulse = q.pulse || 0, spread = q.spread || 0, laser = q.laser || 0;
+    // 星爆：脉冲主导（脉冲×2，或 PULSE × SCATTER）
+    if (pulse >= 2 || (pulse >= 1 && spread >= 1)) { evolveWeapon('nova'); return; }
+    // 棱镜：纯散射×2，边界折射
+    if (spread >= 2) { evolveWeapon('prism'); return; }
+    // 裂空：穿透体系（LANCE×2，或 LANCE × 贯穿协议）
+    if (laser >= 2 || (laser >= 1 && S.upgrades.pierce)) { evolveWeapon('rift'); return; }
+    // 审判：散射 × 穿透，穿透弹幕
+    if (laser >= 1 && spread >= 1) { evolveWeapon('judgment'); return; }
+    // 相位：脉冲 × 穿透，自动追踪
+    if (laser >= 1 && pulse >= 1) { evolveWeapon('pulsar'); }
   }
 
   function evolveWeapon(id) {
@@ -1632,6 +1672,8 @@
     rg.life = 0.6; rg.max = 0.6; rg.color = id === 'nova' ? '#ffd45e' : '#c9a2ff';
     sfx.evolve();
   }
+
+  function evoInfo(id) { return CFG.evo[id] || { name: id, sub: '' }; }
 
   function updateEvolution(dt) {
     if (S.evolution) S.evolution.t += dt;
@@ -2265,7 +2307,21 @@
     // 子弹：只查自身所在格的 3×3 邻域
     for (i = S.bullets.length - 1; i >= 0; i--) {
       var b = S.bullets[i];
+      if (b.homing) steerBullet(b, dt);
       b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      // 棱镜：一次边界折射
+      if (b.bounce > 0) {
+        var bounced = false;
+        if (b.x < 6) { b.x = 6; b.vx = Math.abs(b.vx); bounced = true; }
+        else if (b.x > W - 6) { b.x = W - 6; b.vx = -Math.abs(b.vx); bounced = true; }
+        if (b.y < 6) { b.y = 6; b.vy = Math.abs(b.vy); bounced = true; }
+        else if (b.y > H - 6) { b.y = H - 6; b.vy = -Math.abs(b.vy); bounced = true; }
+        if (bounced) {
+          b.bounce -= 1;
+          sparkBurst(b.x, b.y, 4, '#6dffb0');
+          sfx.split();
+        }
+      }
       if (b.life <= 0 || b.x < -40 || b.x > W + 40 || b.y < -40 || b.y > H + 40) {
         poolGive('bullets', S.bullets, i); continue;
       }
@@ -2938,8 +2994,8 @@
     // 武器进化横幅
     if (S.evoBanner > 0) {
       var ea = clamp(S.evoBanner / 2.8, 0, 1);
-      var evoName = S.evolved === 'rift' ? '裂空' : '星爆';
-      var evoSub = S.evolved === 'rift' ? '命中点爆炸 · 穿透弹道' : '命中分裂 · 脉冲散射融合';
+      var evoName = evoInfo(S.evolved).name;
+      var evoSub = evoInfo(S.evolved).sub;
       ctx.save();
       ctx.globalAlpha = ea * 0.9;
       ctx.textAlign = 'center';
