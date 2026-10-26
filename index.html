@@ -250,7 +250,7 @@
     upgrade: null,
     upgrades: null,
     metaOpen: false, metaHover: -1, shardsEarned: 0,
-    wingCount: 1, wingLevel: 1, wings: [],
+    wingCount: 1, wingLevel: 1, wings: [], lastBossHp: 0,
     weaponPicks: null, evolved: null, evoForms: [], evolution: null, evoBanner: 0,
     evoTier: 1, evoMats: {}, energyBank: 0, lastBaseWeapon: 'pulse', bossRefundArmed: false,
     evoBannerTitle: '', evoBannerSub: '',
@@ -341,9 +341,10 @@
     { id: 'hp', name: '机体冗余', desc: '初始生命上限 +1', max: 3, baseCost: 1, color: '#6dffb0' },
     { id: 'dmg', name: '火控校准', desc: '初始伤害 +8%', max: 5, baseCost: 1, color: '#ff6fae' },
     { id: 'speed', name: '推进器调校', desc: '移动速度 +5%', max: 4, baseCost: 1, color: '#5ee8ff' },
-    { id: 'wing', name: '僚机授权', desc: '开局额外 +1 架僚机', max: 2, baseCost: 5, color: '#b98cff' }
+    { id: 'wing', name: '僚机授权', desc: '开局额外 +1 架僚机', max: 2, baseCost: 5, color: '#b98cff' },
+    { id: 'slots', name: '融合槽位', desc: '解锁 1 个融合能量槽（最多 4）', max: 4, baseCost: 1, color: '#6dffb0' }
   ];
-  var meta = { version: META_VERSION, shards: 0, hp: 0, dmg: 0, speed: 0, wing: 0 };
+  var meta = { version: META_VERSION, shards: 0, hp: 0, dmg: 0, speed: 0, wing: 0, slots: 0 };
   try {
     var mRaw = JSON.parse(window.localStorage.getItem('neon-swarm-meta') || 'null');
     // v2 经济：旧档按普通击杀给碎片，数值已失控；一次性重置为新经济
@@ -354,7 +355,7 @@
         meta[md.id] = clamp(Math.floor(mRaw[md.id] || 0), 0, md.max);
       }
     }
-  } catch (e) { meta = { version: META_VERSION, shards: 0, hp: 0, dmg: 0, speed: 0, wing: 0 }; }
+  } catch (e) { meta = { version: META_VERSION, shards: 0, hp: 0, dmg: 0, speed: 0, wing: 0, slots: 0 }; }
   if (typeof mRaw !== 'undefined' && mRaw && mRaw.version !== META_VERSION) saveMeta();
 
   function metaDef(id) {
@@ -362,6 +363,10 @@
     return null;
   }
   function metaCost(def) { return def.baseCost * (meta[def.id] + 1); }
+  function fusionSlotCount() {
+    if (!progress.metaUnlocked) return 0;
+    return Math.max(0, Math.min(4, Math.floor(meta.slots || 0)));
+  }
   function saveMeta() {
     try { window.localStorage.setItem('neon-swarm-meta', JSON.stringify(meta)); } catch (e) {}
   }
@@ -413,14 +418,14 @@
     };
   }
   var RUN_INFO = {
-    1: { title: '基础模拟', sub: '学员07 · 仅开放 PULSE 标准弹道 · Boss 半血',
+    1: { title: '基础模拟', sub: '学员07 · 仅开放 PULSE 标准弹道',
          line: '学员07，基础模拟接入。仅开放 PULSE 标准弹道。' },
     2: { title: '机型权限', sub: '学员07 · 机型选择 / SCATTER 模块已开放',
          line: '学员07，基础模拟已通过。机型与 SCATTER 权限开放。' },
     3: { title: '高阶战术', sub: '学员07 · LANCE / 异常词缀；击穿核心解锁系统升级',
          line: '学员07，进阶模拟通过。LANCE 与异常词缀接入。' },
-    4: { title: '融合协议', sub: '学员07 · 融合武器 / 双词缀战场已开放',
-         line: '学员07，模拟核心已击穿。融合协议与双词缀开放。' }
+    4: { title: '融合协议', sub: '学员07 · 融合武器 / 双词缀 · 槽位需科技树解锁',
+         line: '学员07，模拟核心已击穿。融合协议开放；先在科技树解锁槽体。' }
   };
   function runInfo(n) {
     return RUN_INFO[Math.min(4, Math.max(1, n || 1))] || RUN_INFO[4];
@@ -1396,6 +1401,7 @@
     poolReleaseAll('rings', S.rings); poolReleaseAll('floats', S.floats);
     poolReleaseAll('pickups', S.pickups); poolReleaseAll('ebullets', S.ebullets);
     S.wave = 1; S.waveT = 0; S.wavePhase = 'normal'; S.warnTick = 0;
+    S.lastBossHp = 0;
     S.waveAffixes = []; S.affixCursor = 0; S.fields.length = 0;
     S.affixBlasts.length = 0; S.affixGhosts.length = 0; S.affixLinks.length = 0;
     S.waveBanner = 0; S.waveBannerText = ''; S.boss = null;
@@ -1929,7 +1935,7 @@
   }
 
   function checkWeaponEvolution() {
-    if (!runUnlocks(S.runNo || 1).fusion) return null;
+    if (!runUnlocks(S.runNo || 1).fusion || fusionSlotCount() <= 0) return null;
     var id = nextEvolutionFor();
     if (!id) return null;
     evolveWeapon(id);
@@ -1954,8 +1960,8 @@
 
   function makeFusionMats(id) {
     var types = evoInfo(id).mats || ['pulse', 'pulse', 'spread', 'spread'];
-    var out = [], cap = fusionCap();
-    for (var i = 0; i < 4; i++) {
+    var out = [], cap = fusionCap(), slots = fusionSlotCount();
+    for (var i = 0; i < slots; i++) {
       var energy = Math.round(cap * (1 - i * 0.15));
       out.push({ type: types[i % types.length], life: energy, max: cap });
     }
@@ -2026,11 +2032,12 @@
 
   function mountFusionMaterial(type) {
     var ids = [S.evolved].concat(S.evoForms.filter(function (id) { return id !== S.evolved; }));
+    var slots = fusionSlotCount();
     for (var i = 0; i < ids.length; i++) {
       var id = ids[i], types = evoInfo(id).mats || [], arr = S.evoMats[id];
       if (!arr || types.indexOf(type) < 0) continue;
       var cap = fusionCap();
-      if (arr.length < 4) {
+      if (arr.length < slots) {
         arr.push({ type: type, life: Math.round(cap * 0.45), max: cap });
       } else {
         var idx = -1, low = Infinity;
@@ -2544,7 +2551,9 @@
     S.affixBlasts.length = 0; S.affixGhosts.length = 0; S.affixLinks.length = 0;
     var floorHp = CFG.wave.bossBaseHp + CFG.wave.bossHpPerWave * (S.wave - 1);
     var hp = Math.max(floorHp, Math.round(playerDpsEstimate() * CFG.wave.bossTtk));
-    if (S.runNo === 1) hp = Math.max(1, Math.round(hp * 0.5));
+    // Boss 不允许因玩家 DPS 下降而变脆：本局历史最高 HP 是下限
+    if (S.lastBossHp > 0 && hp < S.lastBossHp) hp = S.lastBossHp;
+    S.lastBossHp = hp;
     S.boss = {
       x: W / 2, y: H / 2, r: CFG.wave.bossRadius,
       hp: hp, maxHp: hp, t: 0, formT: 0, state: 'forming', rise: 0,
@@ -3302,7 +3311,8 @@
       return;
     }
     var mats = S.evoMats[S.evolved] || [];
-    for (var i = 0; i < 4; i++) {
+    var slots = fusionSlotCount();
+    for (var i = 0; i < slots; i++) {
       var a = -Math.PI / 2 + i * TAU / 4;
       var x = p.x + Math.cos(a) * radius;
       var y = p.y + Math.sin(a) * radius;
@@ -3930,7 +3940,7 @@
   }
 
   function metaRowRect(i) {
-    return { x: 120, y: 160 + i * 86, w: 720, h: 74 };
+    return { x: 120, y: 150 + i * 78, w: 720, h: 68 };
   }
   function metaBuyRect(i) {
     var r = metaRowRect(i);
@@ -4680,7 +4690,7 @@
     switchEvoForm: switchEvoForm, updateFusion: updateFusion, rollWaveAffixes: rollWaveAffixes,
     updateAffixEffects: updateAffixEffects, progress: progress, runUnlocks: runUnlocks,
     nextRunNo: nextRunNo, pickupAllowed: pickupAllowed, RUN_INFO: RUN_INFO,
-    UPGRADE_DEFS: UPGRADE_DEFS,
+    fusionSlotCount: fusionSlotCount, UPGRADE_DEFS: UPGRADE_DEFS,
     spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
     selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
     ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
