@@ -2004,30 +2004,36 @@
   }
 
   function evolveWeapon(id) {
+    var activate = !S.evolved;
     if (!S.evoForms.length) S.lastBaseWeapon = S.player.weapon;
     if (S.evoForms.indexOf(id) < 0) S.evoForms.push(id);
     S.evoMats[id] = makeFusionMats(id);
-    var bank = S.energyBank || 0;
-    S.energyBank = 0;
-    var cap = fusionCap();
-    for (var bi = 0; bi < S.evoMats[id].length; bi++) {
-      S.evoMats[id][bi].max = cap;
-      S.evoMats[id][bi].life = Math.min(cap, S.evoMats[id][bi].life + Math.round(bank * 0.3));
+    if (activate) {
+      var bank = S.energyBank || 0;
+      S.energyBank = 0;
+      var cap = fusionCap();
+      for (var bi = 0; bi < S.evoMats[id].length; bi++) {
+        S.evoMats[id][bi].max = cap;
+        S.evoMats[id][bi].life = Math.min(cap, S.evoMats[id][bi].life + Math.round(bank * 0.3));
+      }
+      S.evolved = id;
+      S.player.weapon = id;
+      S.evoTier = matTier(S.evoMats[id].length);
+      // 进化不切 mode/不暂停/不松火：只做即时视觉反馈
+      S.evolution = null;
+      setEvoBanner('WEAPON EVOLUTION', evoInfo(id).sub, 1.8);
+      S.fireCooldown = 0;
+      S.victoryFlash = 0.3;
+      S.trauma = Math.min(1, S.trauma + 0.3);
+      sparkBurst(S.player.x, S.player.y, 30, id === 'nova' ? '#ffd45e' : '#c9a2ff');
+      var rg = poolTake('rings', S.rings);
+      rg.x = S.player.x; rg.y = S.player.y; rg.r = 12; rg.r1 = 150;
+      rg.life = 0.6; rg.max = 0.6; rg.color = id === 'nova' ? '#ffd45e' : '#c9a2ff';
+      sfx.evolve();
+    } else {
+      // 已有激活形态：只挂载到形态池，不抢当前武器、不重置射速
+      setSysLog('新形态已挂载：' + evoInfo(id).name + ' · Q 切换');
     }
-    S.evolved = id;
-    S.player.weapon = id;
-    S.evoTier = matTier(S.evoMats[id].length);
-    // 进化不再切换 mode/暂停，也不打断按住开火：只做即时视觉反馈
-    S.evolution = null;
-    setEvoBanner('WEAPON EVOLUTION', evoInfo(id).sub, 1.8);
-    S.fireCooldown = 0;
-    S.victoryFlash = 0.3;
-    S.trauma = Math.min(1, S.trauma + 0.3);
-    sparkBurst(S.player.x, S.player.y, 30, id === 'nova' ? '#ffd45e' : '#c9a2ff');
-    var rg = poolTake('rings', S.rings);
-    rg.x = S.player.x; rg.y = S.player.y; rg.r = 12; rg.r1 = 150;
-    rg.life = 0.6; rg.max = 0.6; rg.color = id === 'nova' ? '#ffd45e' : '#c9a2ff';
-    sfx.evolve();
   }
 
   function mountFusionMaterial(type) {
