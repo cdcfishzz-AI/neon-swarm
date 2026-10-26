@@ -241,6 +241,7 @@
     trauma: 0, hitStop: 0, hurtFlash: 0,
     deathT: 0, deathReport: null,
     introT: 0, selectT: 1,
+    runNo: 0, selectNotice: '', selectNoticeT: 0, metaJustUnlocked: false,
     wave: 1, waveT: 0, wavePhase: 'normal', warnTick: 0,
     waveAffixes: [], affixCursor: 0, fields: [],
     affixBlasts: [], affixGhosts: [], affixLinks: [],
@@ -373,6 +374,60 @@
     meta[id] += 1;
     saveMeta();
     return true;
+  }
+
+  // ===== 新手引导 / 渐进式解锁（localStorage 局数）=====
+  var PROGRESS_KEY = 'neon-swarm-progress-v1';
+  var progress = { version: 1, runs: 0, metaUnlocked: false };
+  var progressLoaded = false;
+  try {
+    var pRaw = JSON.parse(window.localStorage.getItem(PROGRESS_KEY) || 'null');
+    if (pRaw && pRaw.version === 1) {
+      progress.runs = Math.max(0, Math.min(9999, Math.floor(pRaw.runs || 0)));
+      progress.metaUnlocked = !!pRaw.metaUnlocked;
+      progressLoaded = true;
+    }
+  } catch (eP) {}
+  // 老玩家已有局外升级：直接视为已解锁，避免被新引导锁死
+  if (!progressLoaded && (meta.shards > 0 || meta.hp > 0 || meta.dmg > 0 || meta.speed > 0 || meta.wing > 0)) {
+    progress.metaUnlocked = true;
+  }
+  function saveProgress() {
+    try { window.localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress)); } catch (e) {}
+  }
+  function nextRunNo() { return Math.max(1, (progress.runs || 0) + 1); }
+  function beginRun() {
+    progress.runs = Math.max(0, Math.min(9999, (progress.runs || 0) + 1));
+    saveProgress();
+    S.runNo = progress.runs;
+  }
+  function runUnlocks(n) {
+    n = n || 1;
+    return {
+      ships: n >= 2,
+      spread: n >= 2,
+      laser: n >= 3,
+      affixes: n >= 3,
+      fusion: n >= 4,
+      meta: !!progress.metaUnlocked
+    };
+  }
+  var RUN_INFO = {
+    1: { title: '基础模拟', sub: '学员07 · 仅开放 PULSE 标准弹道 · Boss 半血',
+         line: '学员07，基础模拟接入。仅开放 PULSE 标准弹道。' },
+    2: { title: '机型权限', sub: '学员07 · 机型选择 / SCATTER 模块已开放',
+         line: '学员07，基础模拟已通过。机型与 SCATTER 权限开放。' },
+    3: { title: '高阶战术', sub: '学员07 · LANCE / 异常词缀；击穿核心解锁系统升级',
+         line: '学员07，进阶模拟通过。LANCE 与异常词缀接入。' },
+    4: { title: '融合协议', sub: '学员07 · 融合武器 / 双词缀战场已开放',
+         line: '学员07，模拟核心已击穿。融合协议与双词缀开放。' }
+  };
+  function runInfo(n) {
+    return RUN_INFO[Math.min(4, Math.max(1, n || 1))] || RUN_INFO[4];
+  }
+  function showSelectNotice(text) {
+    S.selectNotice = text;
+    S.selectNoticeT = 3.5;
   }
 
   var menu = { hover: -1, resetUntil: 0 };
@@ -1295,7 +1350,7 @@
   function damage() {
     var d = (CFG.fire.dmgBase + Math.floor(S.combo / 10) * CFG.fire.dmgPer10) * weapon().dmg * ship().dmg;
     if (S.upgrades) d *= S.upgrades.dmg;
-    d *= 1 + 0.08 * (meta ? meta.dmg : 0);
+    d *= 1 + 0.08 * (progress.metaUnlocked && meta ? meta.dmg : 0);
     if (S.player && S.player.over > 0) d *= 1.3;
     return d;
   }
@@ -1322,8 +1377,11 @@
   // ===== 生命周期 =====
   function reset(shipId, mode) {
     if (shipId && CFG.ships[shipId]) S.ship = shipId;
+    if (!S.runNo) S.runNo = nextRunNo();
     var sh = ship();
     S.mode = mode || 'playing'; S.time = 0; S.elapsed = 0;
+    S.metaJustUnlocked = false;
+    S.selectNotice = ''; S.selectNoticeT = 0;
     S.slow = 0;
     S.score = 0; S.kills = 0; S.maxCombo = 0;
     S.deathT = 0; S.deathReport = null;
@@ -1354,10 +1412,11 @@
       lifesteal: 0, chain: 0, core: 0,
       picks: {}, family: { yellow: 0, pink: 0, green: 0, blue: 0 }
     };
-    var metaHp = meta ? meta.hp : 0;
+    var metaOn = !!progress.metaUnlocked;
+    var metaHp = metaOn && meta ? meta.hp : 0;
     S.player = { x: W / 2, y: H / 2, r: sh.r, hp: sh.hp + metaHp, maxHp: sh.hp + metaHp,
                  inv: 0, aim: -Math.PI / 2, weapon: 'pulse', shield: 0, over: 0 };
-    S.wingCount = Math.min(3, 1 + (meta ? meta.wing : 0));
+    S.wingCount = Math.min(3, 1 + (metaOn && meta ? meta.wing : 0));
     S.wingLevel = 1;
     S.wings = [];
     for (var wi = 0; wi < S.wingCount; wi++) {
@@ -1380,6 +1439,14 @@
 
   function selectShip(id) {
     if (!CFG.ships[id]) return;
+    var planned = S.mode === 'select' ? nextRunNo() : (S.runNo || nextRunNo());
+    var u = runUnlocks(planned);
+    if (id !== 'striker' && !u.ships) {
+      showSelectNotice('学员07，机型权限将在第 2 局开放。当前仅授权 STRIKER。');
+      sfx.uiHover();
+      return;
+    }
+    beginRun();
     reset(id, 'intro');
     S.introT = 0;
     sfx.deploy();
@@ -1402,8 +1469,11 @@
   function rollWaveAffixes() {
     S.waveAffixes = [];
     S.affixCursor = 0;
-    if (S.wave < 2) return;
-    var ids = Object.keys(CFG.affixes), count = S.wave >= 4 ? 2 : 1;
+    var u = runUnlocks(S.runNo || 1);
+    if (!u.affixes || S.wave < 2) return;
+    var ids = Object.keys(CFG.affixes);
+    // 第 3 局为词缀教学：每波 1 个；第 4 局起恢复第 4 波 2 个
+    var count = (S.runNo >= 4 && S.wave >= 4) ? 2 : 1;
     for (var i = 0; i < count && ids.length; i++) {
       var j = Math.floor(rnd() * ids.length);
       S.waveAffixes.push(ids.splice(j, 1)[0]);
@@ -1763,13 +1833,25 @@
   }
 
   // ===== 掉落物：权重抽取 / 生成 / 拾取 =====
+  function pickupAllowed(type) {
+    var u = runUnlocks(S.runNo || 1);
+    if (type === 'w_spread') return u.spread;
+    if (type === 'w_laser') return u.laser;
+    return true;
+  }
+
   function pickWeighted() {
-    var total = 0, i;
-    for (i = 0; i < CFG.pickupTable.length; i++) total += CFG.pickupTable[i].weight;
+    var total = 0, i, t;
+    for (i = 0; i < CFG.pickupTable.length; i++) {
+      t = CFG.pickupTable[i];
+      if (pickupAllowed(t.type)) total += t.weight;
+    }
     var r = rnd() * total;
     for (i = 0; i < CFG.pickupTable.length; i++) {
-      r -= CFG.pickupTable[i].weight;
-      if (r <= 0) return CFG.pickupTable[i].type;
+      t = CFG.pickupTable[i];
+      if (!pickupAllowed(t.type)) continue;
+      r -= t.weight;
+      if (r <= 0) return t.type;
     }
     return 'heal';
   }
@@ -1847,6 +1929,7 @@
   }
 
   function checkWeaponEvolution() {
+    if (!runUnlocks(S.runNo || 1).fusion) return null;
     var id = nextEvolutionFor();
     if (!id) return null;
     evolveWeapon(id);
@@ -2162,7 +2245,9 @@
     spawnSurge(8);
     S.waveBanner = 2.2;
     S.waveBannerText = 'WAVE ' + S.wave + ' · 强化完成' +
-      (S.waveAffixes.length ? ' · ' + affixText() : '');
+      (S.waveAffixes.length ? ' · ' + affixText() : '') +
+      (S.metaJustUnlocked ? ' · 系统升级已解锁' : '');
+    S.metaJustUnlocked = false;
     duckMusic(false);
     sfx.upgradePick();
     // 若刚拿到“贯穿协议”且已持有 LANCE，立即满足裂空融合
@@ -2459,6 +2544,7 @@
     S.affixBlasts.length = 0; S.affixGhosts.length = 0; S.affixLinks.length = 0;
     var floorHp = CFG.wave.bossBaseHp + CFG.wave.bossHpPerWave * (S.wave - 1);
     var hp = Math.max(floorHp, Math.round(playerDpsEstimate() * CFG.wave.bossTtk));
+    if (S.runNo === 1) hp = Math.max(1, Math.round(hp * 0.5));
     S.boss = {
       x: W / 2, y: H / 2, r: CFG.wave.bossRadius,
       hp: hp, maxHp: hp, t: 0, formT: 0, state: 'forming', rise: 0,
@@ -2605,6 +2691,12 @@
     S.waveT = 0;
     S.wavePhase = 'normal';
     rollWaveAffixes();
+    if (S.runNo >= 3 && !progress.metaUnlocked) {
+      progress.metaUnlocked = true;
+      saveProgress();
+      S.metaJustUnlocked = true;
+      setSysLog('学员07，模拟核心已击穿。系统升级权限开放。');
+    }
     S.spawnTimer = 0.4;
     S.waveBanner = 0;
     S.waveBannerText = '';
@@ -2650,7 +2742,8 @@
     var dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
     var dl = Math.hypot(dx, dy);
     if (dl > 0) { dx /= dl; dy /= dl; }
-    var spd = ship().speed * (S.upgrades ? S.upgrades.speed : 1) * (1 + 0.05 * (meta ? meta.speed : 0));
+    var spd = ship().speed * (S.upgrades ? S.upgrades.speed : 1) *
+      (1 + 0.05 * (progress.metaUnlocked && meta ? meta.speed : 0));
     for (i = 0; i < S.fields.length; i++) {
       var ff = S.fields[i], fdx = p.x - ff.x, fdy = p.y - ff.y;
       if (fdx * fdx + fdy * fdy < (ff.r + p.r) * (ff.r + p.r)) { spd *= CFG.affix.fieldSlow; break; }
@@ -3745,7 +3838,7 @@
     var labels = [
       '声音：' + (muted ? '关' : '开') + ' (M)',
       '全屏：' + (document.fullscreenElement ? '开' : '关') + ' (F)',
-      '系统升级 (U)',
+      progress.metaUnlocked ? '系统升级 (U)' : '系统升级 (锁)',
       Date.now() < menu.resetUntil ? '再次点击确认' : '重置最高分'
     ];
     var widths = [132, 120, 148, 158], gap = 14;
@@ -3840,6 +3933,12 @@
 
   function openMeta() {
     if (S.mode !== 'select' && S.mode !== 'dead') return;
+    if (!progress.metaUnlocked) {
+      showSelectNotice('学员07，权限未开放：击穿第 3 局模拟核心后，系统升级才会解锁。');
+      setSysLog('权限未开放：击穿第 3 局模拟核心。');
+      sfx.uiHover();
+      return;
+    }
     S.metaOpen = true;
     S.metaHover = -1;
     sfx.upgradeOpen();
@@ -3980,6 +4079,14 @@
     ctx.fillStyle = COL.dim;
     ctx.font = '600 14px ' + FONT;
     ctx.fillText('街机爽感原型 · 选择机型', W / 2, 166);
+    var selRun = S.runNo || nextRunNo();
+    var selInfo = runInfo(selRun), selUnlocks = runUnlocks(selRun);
+    ctx.fillStyle = '#9EE7FF';
+    ctx.font = '700 12px ' + FONT;
+    ctx.fillText('RUN #' + selRun + ' · ' + selInfo.title, W / 2, 190);
+    ctx.fillStyle = 'rgba(160, 195, 235, 0.62)';
+    ctx.font = '500 11px ' + FONT;
+    ctx.fillText(selInfo.sub, W / 2, 207);
 
     for (var i = 0; i < SHIP_ORDER.length; i++) {
       var id = SHIP_ORDER[i], sh = CFG.ships[id], r = cardRect(i);
@@ -4022,6 +4129,15 @@
       ctx.fillStyle = 'rgba(150, 180, 230, 0.4)';
       ctx.font = '500 10px ' + FONT;
       ctx.fillText('HP ' + sh.hp, r.x + r.w / 2, r.y + 228);
+      if (id !== 'striker' && !selUnlocks.ships) {
+        ctx.fillStyle = 'rgba(3, 6, 14, 0.76)';
+        ctx.fillRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+        ctx.fillStyle = 'rgba(180, 205, 240, 0.62)';
+        ctx.font = '800 13px ' + FONT;
+        ctx.fillText('LOCKED', r.x + r.w / 2, r.y + 92);
+        ctx.font = '500 11px ' + FONT;
+        ctx.fillText('第 2 局开放', r.x + r.w / 2, r.y + 114);
+      }
     }
 
     ctx.fillStyle = best > 0 ? '#ffd45e' : 'rgba(150, 180, 230, 0.45)';
@@ -4044,9 +4160,15 @@
       ctx.fillText(br.label, br.x + br.w / 2, br.y + br.h / 2 + 1);
     }
 
-    ctx.fillStyle = COL.dim;
-    ctx.font = '500 13px ' + FONT;
-    ctx.fillText('按 1 / 2 / 3 或点击卡片开始', W / 2, 564);
+    if (S.selectNoticeT > 0) {
+      ctx.fillStyle = '#ffd45e';
+      ctx.font = '600 12px ' + FONT;
+      ctx.fillText(S.selectNotice, W / 2, 548);
+    } else {
+      ctx.fillStyle = COL.dim;
+      ctx.font = '500 13px ' + FONT;
+      ctx.fillText('按 1 / 2 / 3 或点击卡片开始', W / 2, 564);
+    }
     if (!actx) {
       ctx.fillStyle = 'rgba(255, 210, 120, 0.9)';
       ctx.font = '600 13px ' + FONT;
@@ -4316,11 +4438,12 @@
     ctx.globalAlpha = al * 0.9;
     ctx.fillStyle = '#9EE7FF';
     ctx.font = '800 26px ' + FONT;
-    ctx.fillText('训练接入', W / 2, H / 2 - 92);
-    ctx.globalAlpha = al * 0.55;
+    var ii = runInfo(S.runNo);
+    ctx.fillText('训练接入 · ' + ii.title, W / 2, H / 2 - 92);
+    ctx.globalAlpha = al * 0.62;
     ctx.fillStyle = '#9fb8d8';
     ctx.font = '400 13px ' + FONT;
-    ctx.fillText('学员编号 07 · 模拟核心就绪', W / 2, H / 2 - 54);
+    ctx.fillText(ii.line || ii.sub, W / 2, H / 2 - 54);
     ctx.globalAlpha = al * 0.25;
     ctx.fillStyle = '#9EE7FF';
     ctx.fillRect(W / 2 - 120, H / 2 - 118, 240, 1);
@@ -4341,7 +4464,10 @@
     else if (S.mode === 'intro') updateIntro(dt);
     else if (S.mode === 'reward') updateReward(dt);
     else if (S.mode === 'upgrade') updateUpgrade(dt);
-    else if (S.mode === 'select') S.selectT += dt;
+    else if (S.mode === 'select') {
+      S.selectT += dt;
+      if (S.selectNoticeT > 0) S.selectNoticeT = Math.max(0, S.selectNoticeT - dt);
+    }
     if (dt > 0) fps = fps * 0.92 + (1 / dt) * 0.08;
     render();
     syncCursor();
@@ -4362,6 +4488,7 @@
     else if (k === 'r') {
       if (S.mode === 'dead') returnToSelect();
       else if (S.mode === 'playing' || S.mode === 'paused') {
+        beginRun();
         reset(S.ship); sfx.start(); if (actx) startMusic();
       }
     } else if (k === '1' || k === '2' || k === '3') {
@@ -4526,7 +4653,9 @@
     applyUpgrade: applyUpgrade, chooseUpgrade: chooseUpgrade, rollUpgrades: rollUpgrades,
     updateUpgrade: updateUpgrade, updateReward: updateReward, updateEvolution: updateEvolution,
     switchEvoForm: switchEvoForm, updateFusion: updateFusion, rollWaveAffixes: rollWaveAffixes,
-    updateAffixEffects: updateAffixEffects, UPGRADE_DEFS: UPGRADE_DEFS,
+    updateAffixEffects: updateAffixEffects, progress: progress, runUnlocks: runUnlocks,
+    nextRunNo: nextRunNo, pickupAllowed: pickupAllowed, RUN_INFO: RUN_INFO,
+    UPGRADE_DEFS: UPGRADE_DEFS,
     spawnEnemy: spawnEnemy, killEnemy: killEnemy, hurtPlayer: hurtPlayer,
     selectShip: selectShip, spawnPickup: spawnPickup, collectPickup: collectPickup,
     ships: CFG.ships, weapons: CFG.weapons, pickupInfo: CFG.pickupInfo,
